@@ -10,6 +10,7 @@ class BrowserController {
     this.browsers = new Map(); // Map to store active browser instances
     this.defaultBrowser = config.browser.defaultType || 'chromium';
     this.defaultTimeout = config.browser.defaultTimeout || 30000;
+    this.elementCache = new Map(); // Cache for recently accessed elements
   }
 
   /**
@@ -127,6 +128,9 @@ class BrowserController {
         logger.warn(`Page loaded with status ${response.status()} for ${url}`);
       }
       
+      // Clear element cache after navigation
+      this.elementCache.clear();
+      
       return {
         url: response ? response.url() : url,
         status: response ? response.status() : 0,
@@ -148,17 +152,23 @@ class BrowserController {
     try {
       const session = this.getSession(sessionId);
       
+      // Try to find element with specific selectors first
+      const resolvedSelector = await this.findBestSelector(selector, sessionId);
+      if (!resolvedSelector) {
+        throw new Error(`Could not find element matching: ${selector}`);
+      }
+      
       // Wait for the element to be visible before interacting
-      await session.page.waitForSelector(selector, { state: 'visible', timeout: this.defaultTimeout });
+      await session.page.waitForSelector(resolvedSelector, { state: 'visible', timeout: this.defaultTimeout });
       
       // Clear the field first (if it's not empty)
       await session.page.evaluate((sel) => {
         const element = document.querySelector(sel);
         if (element) element.value = '';
-      }, selector);
+      }, resolvedSelector);
       
       // Fill the field
-      await session.page.fill(selector, value);
+      await session.page.fill(resolvedSelector, value);
       
       // Trigger change event to ensure JavaScript detects the change
       await session.page.evaluate((sel) => {
@@ -167,10 +177,10 @@ class BrowserController {
           element.dispatchEvent(new Event('input', { bubbles: true }));
           element.dispatchEvent(new Event('change', { bubbles: true }));
         }
-      }, selector);
+      }, resolvedSelector);
       
-      logger.info(`Filled field: ${selector} (${sessionId})`);
-      return { success: true, selector };
+      logger.info(`Filled field: ${resolvedSelector} (${sessionId})`);
+      return { success: true, selector: resolvedSelector };
     } catch (error) {
       logger.error(`Fill field error: ${error.message}`);
       throw new Error(`Failed to fill field ${selector}: ${error.message}`);
@@ -186,30 +196,15 @@ class BrowserController {
     try {
       const session = this.getSession(sessionId);
       
-      // First try to find element with exact selector
-      let elementVisible = await this.isElementVisible(selector, sessionId);
+      // Try to find element with the best match first
+      const resolvedSelector = await this.findBestSelector(selector, sessionId);
       
-      // If not found, try looser selectors
-      if (!elementVisible) {
-        // Try various fallback approaches
-        const alternativeSelectors = this.generateAlternativeSelectors(selector);
-        
-        for (const altSelector of alternativeSelectors) {
-          elementVisible = await this.isElementVisible(altSelector, sessionId);
-          if (elementVisible) {
-            logger.info(`Using alternative selector: ${altSelector}`);
-            selector = altSelector;
-            break;
-          }
-        }
-      }
-      
-      if (!elementVisible) {
+      if (!resolvedSelector) {
         throw new Error(`Element ${selector} not found or not visible`);
       }
       
       // Wait for the element to be enabled/clickable
-      await session.page.waitForSelector(selector, { 
+      await session.page.waitForSelector(resolvedSelector, { 
         state: 'visible', 
         timeout: this.defaultTimeout 
       });
@@ -220,22 +215,243 @@ class BrowserController {
         if (element) {
           element.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
-      }, selector);
+      }, resolvedSelector);
       
       // Wait a brief moment for any animations to complete
       await session.page.waitForTimeout(500);
       
       // Click the element
-      await session.page.click(selector);
+      await session.page.click(resolvedSelector);
       
       // Wait a moment for any page changes to start
       await session.page.waitForTimeout(500);
       
-      logger.info(`Clicked element: ${selector} (${sessionId})`);
-      return { success: true, selector };
+      logger.info(`Clicked element: ${resolvedSelector} (${sessionId})`);
+      return { success: true, selector: resolvedSelector };
     } catch (error) {
       logger.error(`Click element error: ${error.message}`);
       throw new Error(`Failed to click element ${selector}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Find the best selector for an element
+   * @param {string} selector - Initial selector or description
+   * @param {string} sessionId - Browser session ID  
+   * @returns {string|null} Best matching selector or null if not found
+   */
+  async findBestSelector(selector, sessionId) {
+    const session = this.getSession(sessionId);
+    
+    // Step 1: Check if selector is directly valid
+    try {
+      const isVisible = await this.isElementVisible(selector, sessionId);
+      if (isVisible) return selector;
+    } catch (e) {
+      // Ignore error, continue to alternatives
+    }
+    
+    // Step 2: Check cached selectors (if we have text description)
+    if (!selector.includes('.') && !selector.includes('#') && !selector.includes('[')) {
+      for (const [cachedSelector, info] of this.elementCache.entries()) {
+        if (info.text && info.text.toLowerCase().includes(selector.toLowerCase())) {
+          const isVisible = await this.isElementVisible(cachedSelector, sessionId);
+          if (isVisible) return cachedSelector;
+        }
+      }
+    }
+    
+    // Step 3: Try various alternative selectors
+    const alternatives = this.generateAlternativeSelectors(selector);
+    for (const alt of alternatives) {
+      const isVisible = await this.isElementVisible(alt, sessionId);
+      if (isVisible) return alt;
+    }
+    
+    // Step 4: Use text-based search for interactive elements
+    if (!selector.includes('.') && !selector.includes('#') && !selector.includes('[')) {
+      const textSelector = `text="${selector}"`;
+      try {
+        const isVisible = await session.page.isVisible(textSelector, { timeout: 1000 });
+        if (isVisible) return textSelector;
+      } catch (e) {
+        // Ignore error, continue to next strategy
+      }
+
+      // Try contains text
+      const containsSelector = `:text-is("${selector}")`;
+      try {
+        const isVisible = await session.page.isVisible(containsSelector, { timeout: 1000 });
+        if (isVisible) return containsSelector;
+      } catch (e) {
+        // Ignore error, continue to next strategy
+      }
+    }
+    
+    // Step 5: Try to find by analyzing the page structure
+    try {
+      const analysisResult = await this.analyzePageStructure(selector, sessionId);
+      if (analysisResult) return analysisResult;
+    } catch (e) {
+      logger.warn(`Page structure analysis failed: ${e.message}`);
+    }
+    
+    // No suitable selector found
+    return null;
+  }
+
+  /**
+   * Analyze page structure to find a specific element
+   * @param {string} selector - Element description or partial selector
+   * @param {string} sessionId - Browser session ID
+   * @returns {string|null} Generated selector or null if not found
+   */
+  async analyzePageStructure(description, sessionId) {
+    const session = this.getSession(sessionId);
+    
+    // Use JavaScript in the page context to analyze the DOM
+    const analysisResult = await session.page.evaluate((desc) => {
+      // Helper function to check if element is visible
+      function isVisible(el) {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0 && el.offsetHeight > 0;
+      }
+      
+      // Get all interactive visible elements
+      const allElements = Array.from(document.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"]'));
+      const visibleElements = allElements.filter(el => isVisible(el));
+      
+      // Search for elements by text content or attributes
+      const lowerDesc = desc.toLowerCase();
+      const matchingElements = visibleElements.filter(el => {
+        const text = el.textContent?.trim().toLowerCase() || '';
+        const ariaLabel = el.getAttribute('aria-label')?.toLowerCase() || '';
+        const placeholder = el.getAttribute('placeholder')?.toLowerCase() || '';
+        const title = el.getAttribute('title')?.toLowerCase() || '';
+        const alt = el.getAttribute('alt')?.toLowerCase() || '';
+        const name = el.getAttribute('name')?.toLowerCase() || '';
+        const id = el.getAttribute('id')?.toLowerCase() || '';
+        const type = el.getAttribute('type')?.toLowerCase() || '';
+        
+        return text.includes(lowerDesc) || 
+               ariaLabel.includes(lowerDesc) || 
+               placeholder.includes(lowerDesc) || 
+               title.includes(lowerDesc) || 
+               alt.includes(lowerDesc) ||
+               name.includes(lowerDesc) ||
+               id.includes(lowerDesc) ||
+               (type === lowerDesc);
+      });
+      
+      // Return best match if found
+      if (matchingElements.length > 0) {
+        const bestMatch = matchingElements[0];
+        
+        // Try to get a precise selector for this element
+        // First try with ID if available
+        if (bestMatch.id) return `#${bestMatch.id}`;
+        
+        // Next try with a unique attribute if available
+        if (bestMatch.getAttribute('name')) 
+          return `[name="${bestMatch.getAttribute('name')}"]`;
+        
+        if (bestMatch.getAttribute('aria-label')) 
+          return `[aria-label="${bestMatch.getAttribute('aria-label')}"]`;
+        
+        if (bestMatch.getAttribute('placeholder')) 
+          return `[placeholder="${bestMatch.getAttribute('placeholder')}"]`;
+        
+        if (bestMatch.getAttribute('data-testid')) 
+          return `[data-testid="${bestMatch.getAttribute('data-testid')}"]`;
+        
+        // If nothing specific found, collect tag name, classes and textContent for reconstruction
+        return JSON.stringify({
+          tag: bestMatch.tagName.toLowerCase(),
+          text: bestMatch.textContent?.trim() || '',
+          classes: Array.from(bestMatch.classList)
+        });
+      }
+      
+      return null;
+    }, description);
+    
+    if (!analysisResult) return null;
+    
+    // If we got a JSON object instead of a direct selector, reconstruct a selector
+    if (analysisResult.startsWith('{')) {
+      try {
+        const data = JSON.parse(analysisResult);
+        let selector = data.tag;
+        
+        if (data.classes.length > 0) {
+          selector += '.' + data.classes.join('.');
+        }
+        
+        if (data.text) {
+          // Cache this selector with its text for future use
+          this.elementCache.set(selector, { text: data.text });
+          
+          if (data.tag === 'button' || data.tag === 'a') {
+            // For buttons and links, we can use the :text pseudo-class
+            selector = `${data.tag}:has-text("${data.text}")`;
+          }
+        }
+        
+        return selector;
+      } catch (e) {
+        logger.error(`Error parsing element data: ${e.message}`);
+        return null;
+      }
+    }
+    
+    return analysisResult;
+  }
+
+  /**
+   * Find an element based on description or selector
+   * @param {string} description - Element description or selector
+   * @param {string} sessionId - Browser session ID
+   * @returns {ElementHandle|null} Playwright element handle or null if not found
+   */
+  async findElement(description, sessionId) {
+    try {
+      const session = this.getSession(sessionId);
+      
+      // First try to find the best selector that matches the description
+      const selector = await this.findBestSelector(description, sessionId);
+      
+      if (!selector) {
+        logger.warn(`No element found matching description: ${description}`);
+        return null;
+      }
+      
+      // Wait for the element to be visible
+      await session.page.waitForSelector(selector, { 
+        state: 'visible', 
+        timeout: 5000 
+      });
+      
+      // Get the element handle
+      const elementHandle = await session.page.$(selector);
+      
+      if (!elementHandle) {
+        logger.warn(`Element found with selector ${selector} but couldn't get handle`);
+        return null;
+      }
+      
+      // Check if element is visible
+      const isVisible = await elementHandle.isVisible();
+      if (!isVisible) {
+        logger.warn(`Element found with selector ${selector} but is not visible`);
+        await elementHandle.dispose();
+        return null;
+      }
+      
+      return elementHandle;
+    } catch (error) {
+      logger.error(`Find element error: ${error.message}`);
+      return null;
     }
   }
 
@@ -261,50 +477,242 @@ class BrowserController {
    */
   generateAlternativeSelectors(originalSelector) {
     const alternatives = [];
+    const lowerSelector = originalSelector.toLowerCase();
+    
+    // Add site-specific selectors for common elements
+    // Amazon.in specific selectors
+    if (lowerSelector.includes('search') || lowerSelector.includes('find')) {
+      alternatives.push('#twotabsearchtextbox'); // Amazon search box
+      alternatives.push('input[name="field-keywords"]');
+      alternatives.push('input[aria-label*="search" i]');
+    }
+    
+    // Amazon search submit button
+    if (lowerSelector.includes('search button') || lowerSelector.includes('submit search')) {
+      alternatives.push('input[value="Go"]');
+      alternatives.push('input.nav-input[type="submit"]');
+      alternatives.push('#nav-search-submit-button');
+    }
     
     // If it's a button selector, try common button patterns
-    if (originalSelector.includes('button')) {
+    if (lowerSelector.includes('button')) {
       alternatives.push('button');
       alternatives.push('button:visible');
       alternatives.push('[type="button"]');
       alternatives.push('[role="button"]');
       alternatives.push('.btn');
       alternatives.push('.button');
+      alternatives.push('input[type="button"]');
+      alternatives.push('input[type="submit"]');
+      
+      // If the selector has text after "button", use it for text matching
+      const buttonTextMatch = lowerSelector.match(/button\s+(.+)/i);
+      if (buttonTextMatch) {
+        const text = buttonTextMatch[1].trim();
+        alternatives.push(`button:has-text("${text}")`);
+        alternatives.push(`[role="button"]:has-text("${text}")`);
+        alternatives.push(`button:text-is("${text}")`);
+      }
     }
     
     // If it's a link selector, try common link patterns
-    if (originalSelector.includes('a')) {
+    if (lowerSelector.includes('link') || lowerSelector.includes('a ')) {
       alternatives.push('a');
       alternatives.push('a:visible');
       alternatives.push('[href]');
+      
+      // If the selector has text after "link", use it for text matching
+      const linkTextMatch = lowerSelector.match(/link\s+(.+)/i) || lowerSelector.match(/a\s+(.+)/i);
+      if (linkTextMatch) {
+        const text = linkTextMatch[1].trim();
+        alternatives.push(`a:has-text("${text}")`);
+        alternatives.push(`a:text-is("${text}")`);
+      }
     }
     
     // If it's a form field, try common field patterns
-    if (originalSelector.includes('input')) {
+    if (lowerSelector.includes('input') || lowerSelector.includes('field') || lowerSelector.includes('text') || lowerSelector.includes('box')) {
       alternatives.push('input');
       alternatives.push('input:visible');
       alternatives.push('textarea');
+      alternatives.push('input[type="text"]');
+      
+      // More specific fields by common names
+      if (lowerSelector.includes('email')) {
+        alternatives.push('input[type="email"]');
+        alternatives.push('input[name*="email" i]');
+        alternatives.push('input[placeholder*="email" i]');
+      } else if (lowerSelector.includes('password')) {
+        alternatives.push('input[type="password"]');
+        alternatives.push('input[name*="password" i]');
+        alternatives.push('input[placeholder*="password" i]');
+      } else if (lowerSelector.includes('phone')) {
+        alternatives.push('input[type="tel"]');
+        alternatives.push('input[name*="phone" i]');
+        alternatives.push('input[placeholder*="phone" i]');
+      }
     }
     
     // If it's a search field
-    if (originalSelector.includes('search') || originalSelector.includes('[name="q"]')) {
+    if (lowerSelector.includes('search') || lowerSelector.includes('[name="q"]') || lowerSelector.includes('find')) {
       alternatives.push('input[type="search"]');
       alternatives.push('input[name="q"]');
       alternatives.push('input[placeholder*="search" i]');
       alternatives.push('[aria-label*="search" i]');
+      alternatives.push('[name="field-keywords"]'); // Amazon specific
+      alternatives.push('#twotabsearchtextbox'); // Amazon specific
     }
     
     // Submit buttons
-    if (originalSelector.includes('submit')) {
+    if (lowerSelector.includes('submit') || lowerSelector.includes('send') || lowerSelector.includes('go')) {
       alternatives.push('[type="submit"]');
       alternatives.push('button[type="submit"]');
       alternatives.push('input[type="submit"]');
-      alternatives.push('button:contains("Search")');
-      alternatives.push('button:contains("Submit")');
-      alternatives.push('button:contains("Go")');
+      alternatives.push('button:has-text("Search")');
+      alternatives.push('button:has-text("Submit")');
+      alternatives.push('button:has-text("Go")');
+      alternatives.push('button:has-text("Send")');
+      alternatives.push('input[value="Go"]');
+      alternatives.push('#nav-search-submit-button'); // Amazon specific
     }
     
     return alternatives;
+  }
+
+  /**
+   * Get page structure information (DevTools-like inspection)
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Page structure information
+   */
+  async getPageStructure(sessionId) {
+    try {
+      const session = this.getSession(sessionId);
+      
+      // Extract interactive elements on the page with their attributes
+      const structure = await session.page.evaluate(() => {
+        // Helper function to get element attributes
+        const getElementInfo = (element) => {
+          const rect = element.getBoundingClientRect();
+          const computedStyle = window.getComputedStyle(element);
+          
+          return {
+            tag: element.tagName.toLowerCase(),
+            id: element.id || null,
+            className: element.className || null,
+            type: element.getAttribute('type') || null,
+            name: element.getAttribute('name') || null,
+            value: element.value || element.textContent?.trim() || null,
+            placeholder: element.getAttribute('placeholder') || null,
+            ariaLabel: element.getAttribute('aria-label') || null,
+            visible: !(computedStyle.display === 'none' || computedStyle.visibility === 'hidden' || rect.width === 0 || rect.height === 0),
+            position: {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height
+            },
+            attributes: Array.from(element.attributes).map(attr => ({
+              name: attr.name,
+              value: attr.value
+            })),
+            xpath: getXPath(element)
+          };
+        };
+        
+        // Function to get XPath for an element
+        const getXPath = (element) => {
+          if (!element) return '';
+          
+          let xpath = '';
+          let parent = element;
+          
+          while (parent && parent.nodeType === 1) {
+            let index = 1;
+            let hasSiblings = false;
+            
+            for (let sibling = parent.previousSibling; sibling; sibling = sibling.previousSibling) {
+              if (sibling.nodeType === 1 && sibling.tagName === parent.tagName) {
+                index++;
+                hasSiblings = true;
+              }
+            }
+            
+            const tagName = parent.tagName.toLowerCase();
+            const pathIndex = hasSiblings ? `[${index}]` : '';
+            xpath = `/${tagName}${pathIndex}${xpath}`;
+            
+            parent = parent.parentNode;
+          }
+          
+          return xpath;
+        };
+        
+        // Get all interactive elements
+        const interactiveElements = Array.from(document.querySelectorAll(
+          'button, a, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="menuitem"], [tabindex]:not([tabindex="-1"])'
+        )).map(getElementInfo);
+        
+        return {
+          title: document.title,
+          url: window.location.href,
+          interactiveElements: interactiveElements.filter(el => el.visible)
+        };
+      });
+      
+      // Cache elements for future lookups
+      for (const element of structure.interactiveElements) {
+        const selector = this.buildSelectorFromElement(element);
+        if (selector && element.value) {
+          this.elementCache.set(selector, { text: element.value });
+        }
+      }
+      
+      return structure;
+    } catch (error) {
+      logger.error(`Page structure error: ${error.message}`);
+      throw new Error(`Failed to get page structure: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Build a selector from element information
+   * @param {object} element - Element information
+   * @returns {string} CSS selector
+   */
+  buildSelectorFromElement(element) {
+    if (element.id) {
+      return `#${element.id}`;
+    }
+    
+    // Use specific attributes to create precise selectors
+    if (element.name) {
+      return `${element.tag}[name="${element.name}"]`;
+    }
+    
+    if (element.ariaLabel) {
+      return `[aria-label="${element.ariaLabel}"]`;
+    }
+    
+    if (element.placeholder) {
+      return `[placeholder="${element.placeholder}"]`;
+    }
+    
+    // Check for data attributes
+    const dataAttr = element.attributes.find(attr => attr.name.startsWith('data-'));
+    if (dataAttr) {
+      return `[${dataAttr.name}="${dataAttr.value}"]`;
+    }
+    
+    // Use class name if available
+    if (element.className && typeof element.className === 'string') {
+      const classes = element.className.split(' ').filter(c => c.trim());
+      if (classes.length > 0) {
+        return `${element.tag}.${classes.join('.')}`;
+      }
+    }
+    
+    // Fallback to tag name
+    return element.tag;
   }
 
   /**

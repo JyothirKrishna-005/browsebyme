@@ -87,7 +87,7 @@ class CommandParser {
       logger.info(`Detected intent: ${intent.type}`);
       
       // Execute command based on intent
-      return await this.executeCommand(intent, normalizedCommand);
+      return await this.executeCommand(normalizedCommand, this.activeSession);
     } catch (error) {
       logger.error(`Command parser error: ${error.message}`);
       throw new Error(`Failed to parse command: ${error.message}`);
@@ -218,44 +218,69 @@ class CommandParser {
 
   /**
    * Execute a command based on detected intent
-   * @param {object} intent - Intent object with type and confidence
-   * @param {string} command - Original text command
+   * @param {string} command - Text command to execute
+   * @param {string} sessionId - Browser session ID
    * @returns {object} Command execution result
    */
-  async executeCommand(intent, command) {
-    switch (intent.type) {
-      case 'open':
-        return await this.handleOpenCommand(command);
+  async executeCommand(command, sessionId) {
+    try {
+      // Handle commands
+      const tokens = this.tokenizeCommand(command);
+      const action = tokens.shift().toLowerCase();
       
-      case 'navigate':
-        return await this.handleNavigateCommand(command);
-      
-      case 'click':
-        return await this.handleClickCommand(command);
-      
-      case 'type':
-        return await this.handleTypeCommand(command);
-      
-      case 'search':
-        return await this.handleSearchCommand(command);
-      
-      case 'book':
-        return await this.handleBookCommand(command);
-      
-      case 'close':
-        return await this.handleCloseCommand(command);
-      
-      case 'screenshot':
-        return await this.handleScreenshotCommand(command);
+      switch (action) {
+        case 'navigate': 
+        case 'goto': 
+        case 'open':
+          return await this.handleNavigationCommand(tokens, sessionId);
         
-      case 'scroll':
-        return await this.handleScrollCommand(command);
+        case 'click':
+          return await this.handleClickCommand(tokens, sessionId);
         
-      case 'wait':
-        return await this.handleWaitCommand(command);
-      
-      default:
-        throw new Error(`Unknown command intent: ${intent.type} - Please try being more specific`);
+        case 'type': 
+        case 'input': 
+        case 'fill':
+          return await this.handleInputCommand(tokens, sessionId);
+          
+        case 'screenshot':
+          return await this.browserController.takeScreenshot(sessionId);
+        
+        case 'execute': 
+        case 'script':
+          return await this.handleScriptCommand(tokens, sessionId);
+        
+        case 'wait':
+          return await this.handleWaitCommand(tokens, sessionId);
+        
+        case 'back':
+          return await this.browserController.executeScript('window.history.back()', sessionId);
+        
+        case 'forward':
+          return await this.browserController.executeScript('window.history.forward()', sessionId);
+        
+        case 'reload':
+          return await this.browserController.executeScript('window.location.reload()', sessionId);
+          
+        case 'close':
+          return await this.browserController.closeBrowser(sessionId);
+          
+        // New commands for enhanced element selection
+        case 'inspect':
+        case 'analyze':
+          return await this.browserController.getPageStructure(sessionId);
+          
+        case 'find':
+          return await this.handleFindCommand(tokens, sessionId);
+          
+        case 'extract':
+        case 'scrape':
+          return await this.handleExtractCommand(tokens, sessionId);
+          
+        default:
+          throw new Error(`Unknown command: ${action}`);
+      }
+    } catch (error) {
+      throw new Error(`Command execution failed: ${error.message}`);
     }
   }
 
@@ -905,6 +930,255 @@ class CommandParser {
     }
     
     return queryMatch ? queryMatch[1].trim() : null;
+  }
+
+  /**
+   * Handle finding elements based on a description
+   * @param {Array} tokens - Command tokens
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Found element details
+   */
+  async handleFindCommand(tokens, sessionId) {
+    if (tokens.length === 0) {
+      throw new Error('Find command requires an element description');
+    }
+    
+    const description = tokens.join(' ');
+    
+    // Find the best matching element using AI-driven selection
+    const element = await this.browserController.findElement(description, sessionId);
+    
+    if (!element) {
+      return { success: false, message: `No element found matching: ${description}` };
+    }
+    
+    // Get detailed information about the element
+    const elementDetails = await this.getElementDetails(element, sessionId);
+    
+    return {
+      success: true,
+      message: `Found element matching: ${description}`,
+      element: elementDetails
+    };
+  }
+  
+  /**
+   * Get detailed information about a DOM element
+   * @param {object} element - Playwright element handle
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Element details
+   */
+  async getElementDetails(element, sessionId) {
+    // Extract various properties of the element
+    const tagName = await element.evaluate(el => el.tagName.toLowerCase());
+    const textContent = await element.evaluate(el => el.textContent?.trim() || '');
+    const isVisible = await element.isVisible();
+    
+    // Get element attributes
+    const attributes = await element.evaluate(el => {
+      const attrs = {};
+      for (const attr of el.attributes) {
+        attrs[attr.name] = attr.value;
+      }
+      return attrs;
+    });
+    
+    // Get element position and dimensions
+    const boundingBox = await element.boundingBox();
+    
+    // Get computed styles
+    const styles = await element.evaluate(el => {
+      const computed = window.getComputedStyle(el);
+      return {
+        color: computed.color,
+        backgroundColor: computed.backgroundColor,
+        fontSize: computed.fontSize,
+        fontWeight: computed.fontWeight,
+        display: computed.display,
+        position: computed.position,
+        visibility: computed.visibility,
+        zIndex: computed.zIndex
+      };
+    });
+    
+    // Generate a unique selector for this element
+    const selector = await element.evaluate(el => {
+      // Simple implementation - more robust one would be needed in production
+      if (el.id) return `#${el.id}`;
+      if (el.className) {
+        const classes = Array.from(el.classList).join('.');
+        return `.${classes}`;
+      }
+      
+      // Fallback to a position-based selector
+      let path = [];
+      let currentEl = el;
+      while (currentEl && currentEl.tagName !== 'HTML') {
+        let selector = currentEl.tagName.toLowerCase();
+        let sameTagSiblings = Array.from(currentEl.parentNode.children)
+          .filter(e => e.tagName === currentEl.tagName);
+        
+        if (sameTagSiblings.length > 1) {
+          const index = sameTagSiblings.indexOf(currentEl) + 1;
+          selector += `:nth-child(${index})`;
+        }
+        
+        path.unshift(selector);
+        currentEl = currentEl.parentNode;
+      }
+      
+      return path.join(' > ');
+    });
+    
+    return {
+      tagName,
+      selector,
+      textContent,
+      isVisible,
+      attributes,
+      boundingBox,
+      styles
+    };
+  }
+  
+  /**
+   * Handle extracting content from elements
+   * @param {Array} tokens - Command tokens
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Extracted content
+   */
+  async handleExtractCommand(tokens, sessionId) {
+    // If no specific selector provided, extract main content
+    if (tokens.length === 0) {
+      return await this.browserController.executeScript(`
+        function extractMainContent() {
+          // Remove navigation, headers, footers, ads, etc.
+          const content = [];
+          
+          // Try to find the main content area
+          const mainContent = document.querySelector('main') || 
+                              document.querySelector('#content') ||
+                              document.querySelector('.content') ||
+                              document.querySelector('article') ||
+                              document.body;
+          
+          // Get headings
+          const headings = mainContent.querySelectorAll('h1, h2, h3');
+          for (const heading of headings) {
+            content.push({
+              type: 'heading',
+              level: parseInt(heading.tagName.substring(1)),
+              text: heading.textContent.trim()
+            });
+          }
+          
+          // Get paragraphs
+          const paragraphs = mainContent.querySelectorAll('p');
+          for (const p of paragraphs) {
+            content.push({
+              type: 'paragraph',
+              text: p.textContent.trim()
+            });
+          }
+          
+          // Get lists
+          const lists = mainContent.querySelectorAll('ul, ol');
+          for (const list of lists) {
+            const items = Array.from(list.querySelectorAll('li'))
+              .map(li => li.textContent.trim());
+            
+            content.push({
+              type: list.tagName.toLowerCase() === 'ul' ? 'unordered_list' : 'ordered_list',
+              items
+            });
+          }
+          
+          // Get tables
+          const tables = mainContent.querySelectorAll('table');
+          for (const table of tables) {
+            const headers = Array.from(table.querySelectorAll('th'))
+              .map(th => th.textContent.trim());
+            
+            const rows = [];
+            for (const row of table.querySelectorAll('tr')) {
+              const cells = Array.from(row.querySelectorAll('td'))
+                .map(td => td.textContent.trim());
+              
+              if (cells.length > 0) {
+                rows.push(cells);
+              }
+            }
+            
+            content.push({
+              type: 'table',
+              headers,
+              rows
+            });
+          }
+          
+          return content;
+        }
+        
+        return extractMainContent();
+      `, sessionId);
+    }
+    
+    // Extract from specific elements
+    const description = tokens.join(' ');
+    const element = await this.browserController.findElement(description, sessionId);
+    
+    if (!element) {
+      return { 
+        success: false, 
+        message: `No element found matching: ${description}` 
+      };
+    }
+    
+    // Extract based on element type
+    const elementDetails = await this.getElementDetails(element, sessionId);
+    const tagName = elementDetails.tagName;
+    
+    if (tagName === 'table') {
+      // Extract table data
+      return await element.evaluate(table => {
+        const headers = Array.from(table.querySelectorAll('th'))
+          .map(th => th.textContent.trim());
+        
+        const rows = [];
+        for (const row of table.querySelectorAll('tr')) {
+          const cells = Array.from(row.querySelectorAll('td'))
+            .map(td => td.textContent.trim());
+          
+          if (cells.length > 0) {
+            rows.push(cells);
+          }
+        }
+        
+        return {
+          type: 'table',
+          headers,
+          rows
+        };
+      });
+    } else if (tagName === 'ul' || tagName === 'ol') {
+      // Extract list items
+      return await element.evaluate(list => {
+        const items = Array.from(list.querySelectorAll('li'))
+          .map(li => li.textContent.trim());
+        
+        return {
+          type: list.tagName.toLowerCase() === 'ul' ? 'unordered_list' : 'ordered_list',
+          items
+        };
+      });
+    } else {
+      // Default extraction
+      return {
+        type: 'text',
+        content: elementDetails.textContent,
+        html: await element.evaluate(el => el.innerHTML)
+      };
+    }
   }
 }
 
