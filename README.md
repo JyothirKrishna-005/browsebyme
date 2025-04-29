@@ -11,12 +11,14 @@ An AI-powered web browser automation tool that allows you to control browsers us
 - 👉 **Multi-Tasking** – Search products, fill forms, and book tickets simultaneously
 - 👉 **Secure Browsing** – Prioritizes your privacy, no sensitive data stored
 - 👉 **Seamless Integration** – Works with popular browsers like Chrome, Edge, Firefox, and Safari
+- 👉 **Google Gemini AI** – Enhanced command understanding with Google's Gemini AI
 
 ## 📋 Prerequisites
 
 - Node.js (v14 or newer)
 - npm or yarn
 - Supported browsers (Chrome, Firefox, Safari, or Edge)
+- [Optional] Google Gemini API key for enhanced AI features
 
 ## 🚀 Installation
 
@@ -31,12 +33,12 @@ cd browsebyme
 npm install
 ```
 
-3. Create a .env file based on the configuration in src/config/config.js:
+3. Create a .env file with the following configuration:
 ```
 PORT=3000
 NODE_ENV=development
 LOG_LEVEL=info
-DEFAULT_BROWSER=chromium
+GEMINI_API_KEY=your_api_key_here  # Optional but recommended
 ```
 
 4. Create the logs directory:
@@ -71,6 +73,20 @@ Here are some example commands:
 - "Buy MacBook Pro from bestbuy.com"
 - "Close all browsers"
 
+## 🧠 AI-Powered Features
+
+BrowseByMe can be enhanced with Google's Gemini AI for better command understanding:
+
+1. Get a Gemini API key from https://makersuite.google.com/app/apikey
+2. Add the API key to your .env file: `GEMINI_API_KEY=your_api_key_here`
+3. Restart the application
+
+With Gemini AI integration enabled, BrowseByMe will:
+- Better understand complex commands
+- Generate more accurate selectors for web elements
+- Adapt to different website structures
+- Provide more natural language interaction
+
 ## 🔧 Development
 
 Run in development mode with hot reloading:
@@ -99,6 +115,7 @@ BrowseByMe consists of the following main components:
 - **Browser Controller**: Manages browser instances and provides automation methods
 - **Command Parser**: Interprets text commands and calls appropriate browser actions
 - **NLP Helper**: Provides natural language processing functions for entity extraction
+- **Gemini AI Service**: Integrates with Google's Generative AI for enhanced command understanding
 - **Logger**: Handles logging for debugging and auditing
 
 ## 📄 License

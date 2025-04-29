@@ -95,20 +95,41 @@ class BrowserController {
         url = 'https://' + url;
       }
       
-      // Wait until network is idle to ensure page is fully loaded
+      logger.info(`Navigating to: ${url} (${sessionId})`);
+      
+      // Use a more reliable navigation strategy instead of waiting for networkidle
+      // First navigate with domcontentloaded which is more reliable
       const response = await session.page.goto(url, { 
-        waitUntil: 'networkidle',
+        waitUntil: 'domcontentloaded',
         timeout: this.defaultTimeout 
       });
       
-      // Wait additional time for SPAs and dynamic content
-      await session.page.waitForTimeout(1000);
+      // After basic navigation completes, we'll wait for the page to stabilize
+      // But we won't make it part of the navigation promise to avoid timeouts
+      try {
+        // Wait for common page elements to indicate the page is usable
+        await Promise.race([
+          session.page.waitForSelector('body', { timeout: 5000 }),
+          session.page.waitForLoadState('load', { timeout: 10000 }).catch(() => {})
+        ]);
+      } catch (e) {
+        // Don't throw if this fails - page might still be usable
+        logger.warn(`Page stabilization timed out for ${url}, but continuing anyway`);
+      }
+      
+      // Wait a moment for any initial scripts to run
+      await session.page.waitForTimeout(500);
       
       logger.info(`Navigated to: ${url} (${sessionId})`);
       
+      // If navigation failed with an error response, log it but don't fail
+      if (response && response.status() >= 400) {
+        logger.warn(`Page loaded with status ${response.status()} for ${url}`);
+      }
+      
       return {
-        url: response.url(),
-        status: response.status(),
+        url: response ? response.url() : url,
+        status: response ? response.status() : 0,
         title: await session.page.title()
       };
     } catch (error) {

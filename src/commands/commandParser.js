@@ -4,6 +4,7 @@
 const natural = require('natural');
 const { logger } = require('../utils/logger');
 const { extractEntities } = require('../utils/nlpHelper');
+const GeminiService = require('../utils/geminiService');
 
 class CommandParser {
   constructor(browserController) {
@@ -11,7 +12,11 @@ class CommandParser {
     this.activeSession = null;
     this.tokenizer = new natural.WordTokenizer();
     
-    // Command patterns for basic intent recognition
+    // Initialize Gemini AI service if API key exists
+    const geminiApiKey = process.env.GEMINI_API_KEY;
+    this.geminiService = new GeminiService(geminiApiKey);
+    
+    // Command patterns for basic intent recognition (used as fallback)
     this.commandPatterns = {
       open: [
         'open', 'launch', 'start', 'create', 'new'
@@ -55,6 +60,25 @@ class CommandParser {
     try {
       logger.info(`Parsing command: ${command}`);
       
+      // Get current state for context
+      const currentState = this.getCurrentState();
+      
+      // Use Gemini AI to process the command if available
+      let aiResult = null;
+      try {
+        aiResult = await this.geminiService.processCommand(command, currentState);
+        logger.info(`AI processed command: ${JSON.stringify(aiResult)}`);
+      } catch (aiError) {
+        logger.error(`AI processing error: ${aiError.message}`);
+        // Will fall back to regular processing
+      }
+      
+      // If AI provided a valid result, use it
+      if (aiResult && aiResult.action && aiResult.action !== 'unknown') {
+        return await this.executeAICommand(aiResult);
+      }
+      
+      // Fall back to traditional processing
       // Normalize command to lowercase
       const normalizedCommand = command.toLowerCase();
       
@@ -67,6 +91,88 @@ class CommandParser {
     } catch (error) {
       logger.error(`Command parser error: ${error.message}`);
       throw new Error(`Failed to parse command: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get current browser state for context
+   * @returns {object} Current state
+   */
+  getCurrentState() {
+    const state = {
+      activeSessionId: this.activeSession
+    };
+    
+    if (this.activeSession) {
+      try {
+        const session = this.browserController.getSession(this.activeSession);
+        state.browserType = session.type;
+        state.url = session.page.url();
+        state.title = session.page.title();
+      } catch (error) {
+        // Silent error - we'll just have less context
+      }
+    }
+    
+    return state;
+  }
+
+  /**
+   * Execute a command from AI processing
+   * @param {object} aiCommand - AI processed command
+   * @returns {object} Command execution result
+   */
+  async executeAICommand(aiCommand) {
+    logger.info(`Executing AI command: ${JSON.stringify(aiCommand)}`);
+    
+    switch (aiCommand.action) {
+      case 'navigate':
+        return await this.handleNavigateCommand(aiCommand.url || '', {
+          url: aiCommand.url
+        });
+      
+      case 'click':
+        return await this.handleClickCommand('', {
+          selector: aiCommand.selector,
+          target: aiCommand.target
+        });
+      
+      case 'type':
+        return await this.handleTypeCommand('', {
+          selector: aiCommand.selector,
+          text: aiCommand.value,
+          target: aiCommand.target
+        });
+      
+      case 'search':
+        return await this.handleSearchCommand(aiCommand.value || '', {
+          query: aiCommand.value
+        });
+      
+      case 'scroll':
+        return await this.handleScrollCommand('', {
+          direction: aiCommand.direction,
+          amount: aiCommand.amount
+        });
+      
+      case 'wait':
+        return await this.handleWaitCommand('', {
+          duration: aiCommand.duration
+        });
+      
+      case 'screenshot':
+        return await this.handleScreenshotCommand('');
+      
+      case 'book':
+        return await this.handleBookCommand(aiCommand.value || '', {
+          details: aiCommand
+        });
+      
+      case 'close':
+        return await this.handleCloseCommand(aiCommand.target === 'all' ? 'close all' : 'close');
+      
+      default:
+        throw new Error(`Unknown AI command action: ${aiCommand.action}`);
     }
   }
 
@@ -187,11 +293,12 @@ class CommandParser {
   /**
    * Handle "navigate" commands
    * @param {string} command - Text command
+   * @param {object} options - Additional options from AI processing
    * @returns {object} Command execution result
    */
-  async handleNavigateCommand(command) {
-    // Extract URL from command
-    let url = this.extractUrl(command);
+  async handleNavigateCommand(command, options = {}) {
+    // Extract URL from command or use the one provided by AI
+    let url = options.url || this.extractUrl(command);
     
     // If we couldn't find a URL, try to treat the command as a search query
     if (!url) {
@@ -243,29 +350,35 @@ class CommandParser {
   /**
    * Handle "click" commands
    * @param {string} command - Text command
+   * @param {object} options - Additional options from AI processing
    * @returns {object} Command execution result
    */
-  async handleClickCommand(command) {
+  async handleClickCommand(command, options = {}) {
     // Check if we have an active session
     if (!this.activeSession) {
       throw new Error('No active browser session. Try "open chrome" first.');
     }
     
-    // Extract selector from command - more sophisticated approach
-    let selector = null;
+    // Extract selector from command or use the one provided by AI
+    let selector = options.selector;
     
-    // Check for specific targets like "first result", "login button", etc.
-    if (command.includes('first') && command.includes('result')) {
-      selector = '.g:first-child a, [data-hveid]:first-child a, [data-ved]:first-child a, .yuRUbf:first-child a';
-    } else if (command.includes('login') && command.includes('button')) {
-      selector = '[type="submit"], button:contains("Login"), button:contains("Sign in"), .login-button, .signin-button';
-    } else if (command.includes('search') && command.includes('button')) {
-      selector = '[type="submit"], button:contains("Search"), button:contains("Go"), .search-button';
-    } else if (command.includes('accept') && (command.includes('cookies') || command.includes('terms'))) {
-      selector = 'button:contains("Accept"), button:contains("Allow"), button:contains("Agree"), .accept-button';
-    } else {
-      // If no specific pattern, try general extraction
-      selector = this.extractSelector(command);
+    if (!selector) {
+      // Check for specific targets like "first result", "login button", etc.
+      if (command.includes('first') && command.includes('result')) {
+        selector = '.g:first-child a, [data-hveid]:first-child a, [data-ved]:first-child a, .yuRUbf:first-child a';
+      } else if (command.includes('login') && command.includes('button')) {
+        selector = '[type="submit"], button:contains("Login"), button:contains("Sign in"), .login-button, .signin-button';
+      } else if (command.includes('search') && command.includes('button')) {
+        selector = '[type="submit"], button:contains("Search"), button:contains("Go"), .search-button';
+      } else if (command.includes('accept') && (command.includes('cookies') || command.includes('terms'))) {
+        selector = 'button:contains("Accept"), button:contains("Allow"), button:contains("Agree"), .accept-button';
+      } else if (options.target) {
+        // If AI provided a target description but no selector, try to generate one
+        selector = this.generateSelectorFromTarget(options.target);
+      } else {
+        // If no specific pattern, try general extraction
+        selector = this.extractSelector(command);
+      }
     }
     
     if (!selector) {
@@ -283,18 +396,56 @@ class CommandParser {
   }
 
   /**
+   * Generate a selector from a target description
+   * @param {string} target - Target description
+   * @returns {string} Generated selector
+   */
+  generateSelectorFromTarget(target) {
+    // Generate selectors based on common patterns
+    const buttonSelectors = [
+      `button:has-text("${target}")`,
+      `[role="button"]:has-text("${target}")`,
+      `input[type="button"][value*="${target}" i]`,
+      `.btn:has-text("${target}")`,
+      `.button:has-text("${target}")`
+    ].join(', ');
+    
+    const linkSelectors = [
+      `a:has-text("${target}")`,
+      `a[href*="${target}" i]`,
+      `a[title*="${target}" i]`
+    ].join(', ');
+    
+    // A general text match selector that works across different element types
+    const textSelectors = [
+      `text="${target}"`,
+      `:has-text("${target}")`
+    ].join(', ');
+    
+    if (target.includes('button') || target.includes('btn')) {
+      return buttonSelectors;
+    } else if (target.includes('link')) {
+      return linkSelectors;
+    } else {
+      return `${buttonSelectors}, ${linkSelectors}, ${textSelectors}`;
+    }
+  }
+
+  /**
    * Handle "type" commands
    * @param {string} command - Text command
+   * @param {object} options - Additional options from AI processing
    * @returns {object} Command execution result
    */
-  async handleTypeCommand(command) {
+  async handleTypeCommand(command, options = {}) {
     // Check if we have an active session
     if (!this.activeSession) {
       throw new Error('No active browser session. Try "open chrome" first.');
     }
     
-    // Extract selector and text
-    const { selector, text } = this.extractSelectorAndText(command);
+    // Extract selector and text or use what AI provided
+    const selector = options.selector || this.extractSelectorFromTarget(options.target) || this.extractSelectorAndText(command).selector;
+    const text = options.text || this.extractSelectorAndText(command).text;
     
     if (!text) {
       throw new Error('No text found to type. Please specify what to type, e.g., "type hello in the search box".');
@@ -316,13 +467,39 @@ class CommandParser {
   }
 
   /**
+   * Extract a selector from a target description
+   * @param {string} target - Target description
+   * @returns {string} Extracted selector
+   */
+  extractSelectorFromTarget(target) {
+    if (!target) return null;
+    
+    const targetLower = target.toLowerCase();
+    
+    if (targetLower.includes('email') || targetLower.includes('mail field')) {
+      return 'input[type="email"], input[name="email"], input[placeholder*="email" i]';
+    } else if (targetLower.includes('password')) {
+      return 'input[type="password"]';
+    } else if (targetLower.includes('search') || targetLower.includes('search box')) {
+      return 'input[type="search"], input[name="q"], input[placeholder*="search" i], [aria-label*="search" i]';
+    } else if (targetLower.includes('username') || targetLower.includes('user name')) {
+      return 'input[name="username"], input[id="username"], input[placeholder*="username" i], input[name="user"]';
+    } else if (targetLower.includes('text') || targetLower.includes('input') || targetLower.includes('field')) {
+      return 'input:visible, textarea:visible';
+    }
+    
+    return null;
+  }
+
+  /**
    * Handle "search" commands
    * @param {string} command - Text command
+   * @param {object} options - Additional options from AI processing
    * @returns {object} Command execution result
    */
-  async handleSearchCommand(command) {
-    // Extract search query
-    const query = this.extractSearchQuery(command);
+  async handleSearchCommand(command, options = {}) {
+    // Extract search query or use the one provided by AI
+    const query = options.query || this.extractSearchQuery(command);
     
     if (!query) {
       throw new Error('No search query found. Please specify what to search for, e.g., "search for best laptops".');
@@ -373,16 +550,17 @@ class CommandParser {
   /**
    * Handle "book" commands
    * @param {string} command - Text command
+   * @param {object} options - Additional options from AI processing
    * @returns {object} Command execution result
    */
-  async handleBookCommand(command) {
+  async handleBookCommand(command, options = {}) {
     // Check if we have an active session
     if (!this.activeSession) {
       throw new Error('No active browser session. Try "open chrome" first.');
     }
     
-    // Extract booking details using NLP
-    const entities = extractEntities(command);
+    // Extract booking details using NLP or use what AI provided
+    const entities = options.details || extractEntities(command);
     
     // Create a description of what we understand
     let bookingDescription = 'Booking task initiated:';
@@ -476,9 +654,10 @@ class CommandParser {
   /**
    * Handle "scroll" commands
    * @param {string} command - Text command
+   * @param {object} options - Additional options from AI processing
    * @returns {object} Command execution result
    */
-  async handleScrollCommand(command) {
+  async handleScrollCommand(command, options = {}) {
     // Check if we have an active session
     if (!this.activeSession) {
       throw new Error('No active browser session. Try "open chrome" first.');
@@ -490,15 +669,15 @@ class CommandParser {
     let scrollY = 500; // Default scroll amount
     let scrollX = 0;
     
-    if (command.includes('down')) {
-      scrollY = 500;
-    } else if (command.includes('up')) {
-      scrollY = -500;
-    } else if (command.includes('left')) {
-      scrollX = -500;
+    if (options.direction === 'down' || command.includes('down')) {
+      scrollY = options.amount || 500;
+    } else if (options.direction === 'up' || command.includes('up')) {
+      scrollY = -(options.amount || 500);
+    } else if (options.direction === 'left' || command.includes('left')) {
+      scrollX = -(options.amount || 500);
       scrollY = 0;
-    } else if (command.includes('right')) {
-      scrollX = 500;
+    } else if (options.direction === 'right' || command.includes('right')) {
+      scrollX = options.amount || 500;
       scrollY = 0;
     }
     
@@ -535,16 +714,17 @@ class CommandParser {
   /**
    * Handle "wait" commands
    * @param {string} command - Text command
+   * @param {object} options - Additional options from AI processing
    * @returns {object} Command execution result
    */
-  async handleWaitCommand(command) {
+  async handleWaitCommand(command, options = {}) {
     // Check if we have an active session
     if (!this.activeSession) {
       throw new Error('No active browser session. Try "open chrome" first.');
     }
     
     // Determine wait time
-    let waitTime = 2000; // Default: 2 seconds
+    let waitTime = options.duration || 2000; // Default: 2 seconds
     
     const numberMatch = command.match(/(\d+)\s*(s|sec|seconds|ms|milliseconds)?/i);
     if (numberMatch) {
