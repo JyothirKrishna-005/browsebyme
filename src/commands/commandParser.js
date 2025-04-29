@@ -217,6 +217,18 @@ class CommandParser {
   }
 
   /**
+   * Tokenize a command string into an array of tokens
+   * @param {string} command - Command string to tokenize
+   * @returns {string[]} Array of tokens
+   */
+  tokenizeCommand(command) {
+    if (!command || typeof command !== 'string') {
+      return [];
+    }
+    return this.tokenizer.tokenize(command);
+  }
+
+  /**
    * Execute a command based on detected intent
    * @param {string} command - Text command to execute
    * @param {string} sessionId - Browser session ID
