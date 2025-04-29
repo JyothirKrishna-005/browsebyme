@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BrowseByMe - Web Browser Automation</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        h1 {
+            color: #2c3e50;
+            font-size: 2.5em;
+        }
+        .logo {
+            font-weight: bold;
+            color: #3498db;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        .command-box {
+            margin: 20px 0;
+        }
+        textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 1em;
+            min-height: 80px;
+            margin-bottom: 10px;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        .response {
+            background-color: #f9f9f9;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #3498db;
+            margin-top: 15px;
+            overflow-wrap: break-word;
+            white-space: pre-wrap;
+        }
+        .examples {
+            margin-top: 30px;
+        }
+        .example {
+            margin-bottom: 10px;
+            padding: 8px;
+            background-color: #f0f7fb;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .example:hover {
+            background-color: #d8eaf4;
+        }
+        .features {
+            margin-top: 30px;
+        }
+        .feature {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: flex-start;
+        }
+        .feature-icon {
+            margin-right: 10px;
+            color: #3498db;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1><span class="logo">BrowseByMe</span></h1>
+        <p>Control your web browser with simple text commands</p>
+    </header>
+
+    <div class="container">
+        <div class="command-box">
+            <h2>Enter your command:</h2>
+            <textarea id="commandInput" placeholder="e.g., 'Open Chrome and go to google.com'"></textarea>
+            <button id="sendCommand">Send Command</button>
+            <div id="response" class="response" style="display: none;"></div>
+        </div>
+
+        <div class="examples">
+            <h3>Example Commands:</h3>
+            <div class="example" onclick="setExample(this)">Open Firefox and go to google.com</div>
+            <div class="example" onclick="setExample(this)">Search for best laptops under $1000</div>
+            <div class="example" onclick="setExample(this)">Click on the first search result</div>
+            <div class="example" onclick="setExample(this)">Fill the email field with 'user@example.com'</div>
+            <div class="example" onclick="setExample(this)">Book 2 tickets for Avatar at 7 PM tomorrow</div>
+            <div class="example" onclick="setExample(this)">Close all browsers</div>
+        </div>
+
+        <div class="features">
+            <h3>Features:</h3>
+            <div class="feature">
+                <div class="feature-icon">👉</div>
+                <div>Full Browser Automation – From shopping to ticket booking to research</div>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">👉</div>
+                <div>Text Commands – Simply tell it what you want</div>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">👉</div>
+                <div>Smart Form Filling – Automatically enters details like addresses, payment info</div>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">👉</div>
+                <div>Multi-Tasking – Search products, fill forms, and book tickets simultaneously</div>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">👉</div>
+                <div>Secure Browsing – Prioritizes your privacy, no sensitive data stored</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function setExample(element) {
+            document.getElementById('commandInput').value = element.textContent;
+        }
+
+        document.getElementById('sendCommand').addEventListener('click', async () => {
+            const command = document.getElementById('commandInput').value;
+            const responseArea = document.getElementById('response');
+            
+            if (!command) {
+                alert('Please enter a command');
+                return;
+            }
+            
+            responseArea.textContent = 'Processing command...';
+            responseArea.style.display = 'block';
+            
+            try {
+                const response = await fetch('/command', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ command })
+                });
+                
+                const data = await response.json();
+                responseArea.textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                responseArea.textContent = `Error: ${error.message}`;
+            }
+        });
+    </script>
+</body>
+</html> 
