@@ -73,26 +73,33 @@ class GeminiService {
         history: this.prepareChatHistory(),
         generationConfig: {
           temperature: 0.2,
-          maxOutputTokens: 1000,
+          maxOutputTokens: 1500,
         }
       });
       
-      // Format prompt with context
+      // Format prompt with context and example of DOM structure if available
+      const domInfo = currentState.domSnapshot ? 
+        `\nCurrent page DOM structure (partial):\n${currentState.domSnapshot}` : '';
+      
       const prompt = `
         ${this.systemInstructions}
         
         Current browser state:
         ${stateInfo}
+        ${domInfo}
         
-        Based on the user's command: "${userCommand}", provide a structured action plan as JSON.
-        Include only the following fields as needed: 
-        - action: The primary action (navigate, click, type, search, etc.)
-        - target: Specific element or URL target
-        - selector: CSS selector if applicable
-        - value: Value to input if applicable
-        - url: URL if applicable
+        Analyze the following user request: "${userCommand}"
         
-        Only respond with valid JSON, no explanations or other text.
+        1. Identify the primary task the user wants to accomplish
+        2. Determine the sequence of actions needed
+        3. For each action, provide all necessary details (selectors, values, etc.)
+        4. Remember to use only standard CSS selectors, not jQuery-style selectors
+        
+        Respond with a structured JSON action plan that can be executed by the system.
+        The response should be a single action object or an array of action objects if multiple steps are needed.
+        Each action object should include appropriate fields like "action", "selector", "value", etc.
+        
+        Return ONLY the JSON response without any other text, explanations, or formatting.
       `;
       
       // Send to model
@@ -100,13 +107,16 @@ class GeminiService {
       const responseText = result.response.text();
       
       // Extract JSON from response (in case model adds extra text)
-      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      const jsonMatch = responseText.match(/(\[|\{)[\s\S]*(\]|\})/);
       let parsedResult;
       
       if (jsonMatch) {
         try {
           parsedResult = JSON.parse(jsonMatch[0]);
           logger.info(`AI processed command: ${JSON.stringify(parsedResult)}`);
+          
+          // Clean up any invalid selectors in the result
+          parsedResult = this.sanitizeSelectors(parsedResult);
           
           // Add to history
           this.addToHistory("assistant", JSON.stringify(parsedResult));
@@ -126,6 +136,49 @@ class GeminiService {
       logger.error(`Gemini AI error: ${error.message}`);
       return this.fallbackProcessCommand(userCommand);
     }
+  }
+  
+  /**
+   * Sanitize selectors to ensure they're valid CSS selectors
+   * @param {object|array} result - The parsed result from AI
+   * @returns {object|array} Sanitized result
+   */
+  sanitizeSelectors(result) {
+    // Handle array of actions
+    if (Array.isArray(result)) {
+      return result.map(action => this.sanitizeSelectors(action));
+    }
+    
+    // Handle single action object
+    if (result && typeof result === 'object') {
+      // If there's a selector field, sanitize it
+      if (result.selector) {
+        // Remove jQuery-style selectors
+        result.selector = result.selector
+          .replace(/:visible/g, '')
+          .replace(/:contains\((.*?)\)/g, ':has-text($1)')
+          .replace(/:eq\(\d+\)/g, '')
+          .trim();
+        
+        // If selector became empty or too simple, provide a fallback
+        if (!result.selector || result.selector === '') {
+          if (result.action === 'click') {
+            result.selector = 'button, a, [role="button"]';
+          } else if (result.action === 'type') {
+            result.selector = 'input, textarea';
+          }
+        }
+      }
+      
+      // Recursively process nested objects
+      for (const key in result) {
+        if (typeof result[key] === 'object' && result[key] !== null) {
+          result[key] = this.sanitizeSelectors(result[key]);
+        }
+      }
+    }
+    
+    return result;
   }
   
   /**
@@ -154,6 +207,10 @@ class GeminiService {
     
     if (state.browserType) {
       info.push(`Browser type: ${state.browserType}`);
+    }
+    
+    if (state.visibleElements) {
+      info.push(`Notable page elements: ${state.visibleElements.join(', ')}`);
     }
     
     return info.join('\n');

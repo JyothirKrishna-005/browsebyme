@@ -60,8 +60,8 @@ class CommandParser {
     try {
       logger.info(`Parsing command: ${command}`);
       
-      // Get current state for context
-      const currentState = this.getCurrentState();
+      // Get current state for context with extended page information
+      const currentState = await this.getEnhancedState();
       
       // Use Gemini AI to process the command if available
       let aiResult = null;
@@ -73,9 +73,24 @@ class CommandParser {
         // Will fall back to regular processing
       }
       
-      // If AI provided a valid result, use it
+      // If AI provided a valid result, use it (could be a single action or an array of actions)
       if (aiResult && aiResult.action && aiResult.action !== 'unknown') {
         return await this.executeAICommand(aiResult);
+      } else if (Array.isArray(aiResult) && aiResult.length > 0) {
+        // Handle action sequences - execute them in order
+        const results = [];
+        for (const action of aiResult) {
+          const result = await this.executeAICommand(action);
+          results.push(result);
+          // Brief pause between actions
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+        return {
+          action: 'sequence',
+          steps: results.length,
+          message: `Executed ${results.length} sequential actions`
+        };
       }
       
       // Fall back to traditional processing
@@ -91,6 +106,118 @@ class CommandParser {
     } catch (error) {
       logger.error(`Command parser error: ${error.message}`);
       throw new Error(`Failed to parse command: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get enhanced current browser state with page structure details
+   * @returns {object} Enhanced current state
+   */
+  async getEnhancedState() {
+    const baseState = this.getCurrentState();
+    
+    if (!this.activeSession) {
+      return baseState;
+    }
+    
+    try {
+      const session = this.browserController.getSession(this.activeSession);
+      
+      // Get visible interactive elements on the page
+      const visibleElements = await session.page.evaluate(() => {
+        // Get the most important interactive elements 
+        const elements = Array.from(document.querySelectorAll('button, a, input, form, nav, [role="button"], [role="link"], [role="menu"]'));
+        
+        return elements
+          .filter(el => {
+            // Simple visibility check
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+          })
+          .map(el => {
+            // Get basic info about the element
+            const tag = el.tagName.toLowerCase();
+            const text = el.innerText || el.textContent || '';
+            const type = el.getAttribute('type') || '';
+            const name = el.getAttribute('name') || '';
+            const id = el.getAttribute('id') || '';
+            const placeholder = el.getAttribute('placeholder') || '';
+            const role = el.getAttribute('role') || '';
+            
+            // Create a description of the element
+            let desc = tag;
+            if (text && text.length < 20) desc += ` "${text.trim()}"`;
+            if (type) desc += ` type="${type}"`;
+            if (name) desc += ` name="${name}"`;
+            if (placeholder) desc += ` placeholder="${placeholder}"`;
+            if (role) desc += ` role="${role}"`;
+            if (id) desc += ` id="${id}"`;
+            
+            return desc;
+          })
+          .filter(Boolean)
+          // Limit to most important elements to avoid huge context
+          .slice(0, 15);
+      });
+      
+      // Get a sample of the DOM structure
+      const domSnapshot = await session.page.evaluate(() => {
+        // Get the main content area if possible
+        const main = document.querySelector('main') || document.querySelector('body');
+        
+        // Simplified structure output
+        function getSimpleStructure(el, depth = 0) {
+          if (!el || depth > 3) return ''; // Limit depth
+          
+          const tag = el.tagName.toLowerCase();
+          const id = el.id ? `#${el.id}` : '';
+          const classes = el.className && typeof el.className === 'string' 
+            ? `.${el.className.trim().replace(/\s+/g, '.')}` 
+            : '';
+          
+          let result = '  '.repeat(depth) + `<${tag}${id}${classes}`;
+          
+          // Add important attributes
+          if (el.getAttribute('type')) result += ` type="${el.getAttribute('type')}"`;
+          if (el.getAttribute('name')) result += ` name="${el.getAttribute('name')}"`;
+          if (el.getAttribute('role')) result += ` role="${el.getAttribute('role')}"`;
+          
+          // Add text if it's short
+          const text = el.innerText || el.textContent || '';
+          if (text && text.length < 40 && text.trim()) {
+            result += `>${text.trim().substring(0, 30)}</${tag}>`;
+            return result;
+          }
+          
+          result += '>';
+          
+          // Process only a sample of children to avoid huge output
+          const children = Array.from(el.children).slice(0, 5);
+          if (children.length > 0) {
+            result += '\n';
+            for (const child of children) {
+              result += getSimpleStructure(child, depth + 1) + '\n';
+            }
+            result += '  '.repeat(depth) + `</${tag}>`;
+          } else {
+            result += `</${tag}>`;
+          }
+          
+          return result;
+        }
+        
+        return getSimpleStructure(main);
+      });
+      
+      return {
+        ...baseState,
+        visibleElements,
+        domSnapshot: domSnapshot.length > 2000 ? domSnapshot.substring(0, 2000) + '...' : domSnapshot
+      };
+    } catch (error) {
+      logger.warn(`Failed to get enhanced state: ${error.message}`);
+      return baseState;
     }
   }
 
