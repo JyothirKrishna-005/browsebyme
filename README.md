@@ -7,6 +7,9 @@ An AI-powered browser automation tool that lets you control browsers using natur
 - Control web browsers with simple text commands
 - AI-powered command interpretation (with Gemini API)
 - Handles navigation, clicking, form filling, searching, and more
+- Enhanced element finding using names, text content, and accessibility attributes
+- Drawing capabilities for canvas elements
+- Smart form detection and interaction
 - Works with Chrome/Chromium, Firefox, and Safari/WebKit
 - Screenshot capture capabilities
 - Multi-browser session support
@@ -46,12 +49,43 @@ BrowseByMe understands natural language commands like:
 
 - "Open Chrome and go to google.com"
 - "Search for AI browser automation"
-- "Click the first result"
-- "Type hello world in the search box"
 - "Click the login button"
+- "Type hello world in the search box"
+- "Find all elements with name 'username'"
+- "Draw a circle on the canvas"
 - "Go to amazon.com and search for headphones"
 - "Take a screenshot"
 - "Scroll down"
+
+### Advanced Features
+
+#### Smart Element Selection
+
+BrowseByMe now uses multiple strategies to find elements:
+
+- Element names: Finds elements by their 'name' attribute
+- Text content: Uses visible text to identify buttons and links
+- ARIA attributes: Leverages accessibility attributes for better selection
+- Element IDs: More reliable than classes for identification
+- Role attributes: Especially for buttons, links, and form controls
+
+This means you can simply say "click the signup button" and the system will intelligently find the right element even if it doesn't have an ID or specific class.
+
+#### Drawing Capabilities
+
+You can now interact with canvas elements using commands like:
+
+- "Draw a circle on the canvas"
+- "Draw a square with color #FF0000"
+- "Draw a line on the canvas with ID 'paintArea'"
+- "Draw freestyle on the canvas"
+
+#### Form Detection
+
+BrowseByMe automatically detects forms and their fields, making it easier to fill out complex forms with a single command:
+
+- "Fill the signup form with email john@example.com and password test123"
+- "Complete the booking form with name John Doe, date June 15, and 2 adults"
 
 ### Advanced Usage
 

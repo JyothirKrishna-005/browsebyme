@@ -123,85 +123,76 @@ class CommandParser {
     try {
       const session = this.browserController.getSession(this.activeSession);
       
-      // Get visible interactive elements on the page
-      const visibleElements = await session.page.evaluate(() => {
-        // Get the most important interactive elements 
-        const elements = Array.from(document.querySelectorAll('button, a, input, form, nav, [role="button"], [role="link"], [role="menu"]'));
-        
-        return elements
-          .filter(el => {
-            // Simple visibility check
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-          })
-          .map(el => {
-            // Get basic info about the element
-            const tag = el.tagName.toLowerCase();
-            const text = el.innerText || el.textContent || '';
-            const type = el.getAttribute('type') || '';
-            const name = el.getAttribute('name') || '';
-            const id = el.getAttribute('id') || '';
-            const placeholder = el.getAttribute('placeholder') || '';
-            const role = el.getAttribute('role') || '';
-            
-            // Create a description of the element
-            let desc = tag;
-            if (text && text.length < 20) desc += ` "${text.trim()}"`;
-            if (type) desc += ` type="${type}"`;
-            if (name) desc += ` name="${name}"`;
-            if (placeholder) desc += ` placeholder="${placeholder}"`;
-            if (role) desc += ` role="${role}"`;
-            if (id) desc += ` id="${id}"`;
-            
-            return desc;
-          })
-          .filter(Boolean)
-          // Limit to most important elements to avoid huge context
-          .slice(0, 15);
-      });
+      // Get page structure for more comprehensive analysis
+      const pageStructure = await this.browserController.getPageStructure(this.activeSession);
       
-      // Get a sample of the DOM structure
+      // Get more detailed information about visible elements
+      const visibleElements = pageStructure.visibleElements.map(el => {
+        let desc = el.tag;
+        
+        // Add name if available
+        if (el.name) desc += ` name="${el.name}"`;
+        
+        // Add text if it's not too long
+        if (el.textContent && el.textContent.length < 30) {
+          desc += ` "${el.textContent.trim()}"`;
+        }
+        
+        // Add type for input elements
+        if (el.type) desc += ` type="${el.type}"`;
+        
+        // Add ID if available
+        if (el.id) desc += ` id="${el.id}"`;
+        
+        // Add placeholder for input fields
+        if (el.placeholder) desc += ` placeholder="${el.placeholder}"`;
+        
+        return desc;
+      }).filter(Boolean).slice(0, 15);
+      
+      // Extract form information
+      const formInfo = pageStructure.forms.map(form => {
+        const fieldInfo = form.fields.map(field => 
+          `${field.type || 'field'} name="${field.name || ''}" id="${field.id || ''}"`
+        ).join(', ');
+        
+        return `Form${form.id ? ' id="' + form.id + '"' : ''}${form.name ? ' name="' + form.name + '"' : ''} fields: [${fieldInfo}]`;
+      }).join('\n');
+      
+      // Extract canvas information
+      const canvasInfo = pageStructure.canvasElements.map(canvas => 
+        `Canvas${canvas.id ? ' id="' + canvas.id + '"' : ''} ${canvas.width}x${canvas.height}`
+      ).join('\n');
+      
+      // Get a simplified DOM structure
       const domSnapshot = await session.page.evaluate(() => {
-        // Get the main content area if possible
+        // Get the main content area
         const main = document.querySelector('main') || document.querySelector('body');
         
-        // Simplified structure output
+        // Helper function to get a simplified element structure
         function getSimpleStructure(el, depth = 0) {
           if (!el || depth > 3) return ''; // Limit depth
           
           const tag = el.tagName.toLowerCase();
           const id = el.id ? `#${el.id}` : '';
-          const classes = el.className && typeof el.className === 'string' 
-            ? `.${el.className.trim().replace(/\s+/g, '.')}` 
-            : '';
+          const name = el.getAttribute('name') ? `[name="${el.getAttribute('name')}"]` : '';
           
-          let result = '  '.repeat(depth) + `<${tag}${id}${classes}`;
-          
-          // Add important attributes
-          if (el.getAttribute('type')) result += ` type="${el.getAttribute('type')}"`;
-          if (el.getAttribute('name')) result += ` name="${el.getAttribute('name')}"`;
-          if (el.getAttribute('role')) result += ` role="${el.getAttribute('role')}"`;
-          
-          // Add text if it's short
+          // Get element text if not too long
           const text = el.innerText || el.textContent || '';
-          if (text && text.length < 40 && text.trim()) {
-            result += `>${text.trim().substring(0, 30)}</${tag}>`;
-            return result;
-          }
+          const shortText = text && text.length < 30 ? `: "${text.trim()}"` : '';
           
-          result += '>';
+          let result = '  '.repeat(depth) + `<${tag}${id}${name}${shortText}>`;
           
-          // Process only a sample of children to avoid huge output
-          const children = Array.from(el.children).slice(0, 5);
-          if (children.length > 0) {
-            result += '\n';
-            for (const child of children) {
-              result += getSimpleStructure(child, depth + 1) + '\n';
+          if (depth < 3) {
+            // Only process a limited number of children to avoid huge output
+            const children = Array.from(el.children).slice(0, 3);
+            if (children.length > 0) {
+              result += '\n';
+              for (const child of children) {
+                result += getSimpleStructure(child, depth + 1) + '\n';
+              }
+              result += '  '.repeat(depth) + `</${tag}>`;
             }
-            result += '  '.repeat(depth) + `</${tag}>`;
-          } else {
-            result += `</${tag}>`;
           }
           
           return result;
@@ -213,7 +204,12 @@ class CommandParser {
       return {
         ...baseState,
         visibleElements,
-        domSnapshot: domSnapshot.length > 2000 ? domSnapshot.substring(0, 2000) + '...' : domSnapshot
+        formInfo: formInfo || 'No forms detected',
+        canvasInfo: canvasInfo || 'No canvas elements detected',
+        domSnapshot: domSnapshot.length > 2000 ? domSnapshot.substring(0, 2000) + '...' : domSnapshot,
+        focusedElementInfo: pageStructure.focusedElement ? 
+          `Focused: ${pageStructure.focusedElement.tag}${pageStructure.focusedElement.id ? ' id="' + pageStructure.focusedElement.id + '"' : ''}${pageStructure.focusedElement.name ? ' name="' + pageStructure.focusedElement.name + '"' : ''}` 
+          : 'No element focused'
       };
     } catch (error) {
       logger.warn(`Failed to get enhanced state: ${error.message}`);
@@ -414,7 +410,16 @@ class CommandParser {
         case 'extract':
         case 'scrape':
           return await this.handleExtractCommand(tokens, sessionId);
-          
+        
+        // New drawing commands
+        case 'draw':
+          return await this.handleDrawCommand(tokens, sessionId);
+        
+        // New command to find by name or text
+        case 'findbyname':
+        case 'findbytext':
+          return await this.handleFindByNameCommand(tokens, sessionId);
+        
         default:
           throw new Error(`Unknown command: ${action}`);
       }
@@ -512,7 +517,7 @@ class CommandParser {
   }
 
   /**
-   * Handle "click" commands
+   * Handle "click" commands with improved element finding
    * @param {string} command - Text command
    * @param {object} options - Additional options from AI processing
    * @returns {object} Command execution result
@@ -527,20 +532,17 @@ class CommandParser {
     let selector = options.selector;
     
     if (!selector) {
-      // Check for specific targets like "first result", "login button", etc.
-      if (command.includes('first') && command.includes('result')) {
-        selector = '.g:first-child a, [data-hveid]:first-child a, [data-ved]:first-child a, .yuRUbf:first-child a';
-      } else if (command.includes('login') && command.includes('button')) {
-        selector = '[type="submit"], button:contains("Login"), button:contains("Sign in"), .login-button, .signin-button';
-      } else if (command.includes('search') && command.includes('button')) {
-        selector = '[type="submit"], button:contains("Search"), button:contains("Go"), .search-button';
-      } else if (command.includes('accept') && (command.includes('cookies') || command.includes('terms'))) {
-        selector = 'button:contains("Accept"), button:contains("Allow"), button:contains("Agree"), .accept-button';
-      } else if (options.target) {
-        // If AI provided a target description but no selector, try to generate one
-        selector = this.generateSelectorFromTarget(options.target);
+      // If target is provided, try to find by name/text first
+      if (options.target) {
+        const namedElements = await this.browserController.findElementsByNameOrText(options.target, this.activeSession);
+        if (namedElements && namedElements.length > 0) {
+          selector = namedElements[0].selector;
+        } else {
+          // Fall back to generating selector
+          selector = this.generateSelectorFromTarget(options.target);
+        }
       } else {
-        // If no specific pattern, try general extraction
+        // Extract selector from command
         selector = this.extractSelector(command);
       }
     }
@@ -596,7 +598,7 @@ class CommandParser {
   }
 
   /**
-   * Handle "type" commands
+   * Handle "type" commands with improved element finding
    * @param {string} command - Text command
    * @param {object} options - Additional options from AI processing
    * @returns {object} Command execution result
@@ -608,8 +610,26 @@ class CommandParser {
     }
     
     // Extract selector and text or use what AI provided
-    const selector = options.selector || this.extractSelectorFromTarget(options.target) || this.extractSelectorAndText(command).selector;
-    const text = options.text || this.extractSelectorAndText(command).text;
+    let selector = options.selector;
+    let text = options.text;
+    
+    if (!selector && options.target) {
+      // Try to find by name/text first
+      const namedElements = await this.browserController.findElementsByNameOrText(options.target, this.activeSession);
+      if (namedElements && namedElements.length > 0) {
+        selector = namedElements[0].selector;
+      } else {
+        // Fall back to extracting selector
+        selector = this.extractSelectorFromTarget(options.target);
+      }
+    }
+    
+    // If we still don't have a selector, try traditional extraction
+    if (!selector) {
+      const extracted = this.extractSelectorAndText(command);
+      selector = extracted.selector;
+      if (!text) text = extracted.text;
+    }
     
     if (!text) {
       throw new Error('No text found to type. Please specify what to type, e.g., "type hello in the search box".');
@@ -1136,7 +1156,22 @@ class CommandParser {
     
     const description = tokens.join(' ');
     
-    // Find the best matching element using AI-driven selection
+    // First try to find elements by name or text content
+    const namedElements = await this.browserController.findElementsByNameOrText(description, sessionId);
+    
+    // If we found elements by name/text, return the best match
+    if (namedElements && namedElements.length > 0) {
+      const bestMatch = namedElements[0];
+      return {
+        success: true,
+        message: `Found element matching: ${description}`,
+        element: bestMatch.element,
+        selector: bestMatch.selector,
+        score: bestMatch.score
+      };
+    }
+    
+    // Fall back to traditional element finding if name/text search didn't work
     const element = await this.browserController.findElement(description, sessionId);
     
     if (!element) {
@@ -1370,6 +1405,154 @@ class CommandParser {
         html: await element.evaluate(el => el.innerHTML)
       };
     }
+  }
+
+  /**
+   * Handle finding elements by name or text content
+   * @param {Array} tokens - Command tokens
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Found elements
+   */
+  async handleFindByNameCommand(tokens, sessionId) {
+    if (tokens.length === 0) {
+      throw new Error('Find by name command requires a name or text to search for');
+    }
+    
+    const nameOrText = tokens.join(' ');
+    
+    // Find elements by name or text
+    const results = await this.browserController.findElementsByNameOrText(nameOrText, sessionId);
+    
+    if (results.length === 0) {
+      return {
+        success: false,
+        message: `No elements found with name or text matching: ${nameOrText}`
+      };
+    }
+    
+    // Return the top 5 results (or fewer if there aren't that many)
+    const topResults = results.slice(0, 5);
+    
+    return {
+      success: true,
+      message: `Found ${results.length} elements matching: ${nameOrText}`,
+      results: topResults.map(item => ({
+        selector: item.selector,
+        score: item.score,
+        element: {
+          tag: item.element.tag,
+          id: item.element.id,
+          name: item.element.name,
+          text: item.element.textContent,
+          type: item.element.type
+        }
+      }))
+    };
+  }
+
+  /**
+   * Handle draw commands for canvas elements
+   * @param {Array} tokens - Command tokens
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Draw result
+   */
+  async handleDrawCommand(tokens, sessionId) {
+    if (tokens.length === 0) {
+      throw new Error('Draw command requires parameters');
+    }
+    
+    // Parse draw command parameters
+    let canvasSelector = 'canvas';  // Default selector
+    let drawingType = 'freestyle';
+    let color = '#000000';
+    let points = [];
+    
+    // Extract parameters from tokens
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i].toLowerCase();
+      
+      if (token === 'on' && i < tokens.length - 1) {
+        // Extract canvas selector
+        canvasSelector = tokens[i + 1];
+        i++; // Skip the next token
+      } else if (token === 'circle' || token === 'square' || token === 'line') {
+        drawingType = token;
+      } else if (token === 'color' && i < tokens.length - 1) {
+        color = tokens[i + 1];
+        i++; // Skip the next token
+      }
+    }
+    
+    // Get canvas dimensions from the page
+    const session = this.browserController.getSession(sessionId);
+    const canvasInfo = await session.page.evaluate((selector) => {
+      const canvas = document.querySelector(selector);
+      if (!canvas) return null;
+      
+      const rect = canvas.getBoundingClientRect();
+      return {
+        width: canvas.width,
+        height: canvas.height,
+        left: rect.left,
+        top: rect.top
+      };
+    }, canvasSelector);
+    
+    if (!canvasInfo) {
+      throw new Error(`Canvas not found with selector: ${canvasSelector}`);
+    }
+    
+    // Generate points based on the drawing type
+    if (drawingType === 'circle') {
+      // Draw a circle in the center
+      const centerX = canvasInfo.width / 2;
+      const centerY = canvasInfo.height / 2;
+      const radius = Math.min(canvasInfo.width, canvasInfo.height) / 4;
+      
+      for (let i = 0; i <= 360; i += 10) {
+        const radian = (i * Math.PI) / 180;
+        const x = centerX + radius * Math.cos(radian);
+        const y = centerY + radius * Math.sin(radian);
+        points.push({ x, y });
+      }
+    } else if (drawingType === 'square') {
+      // Draw a square
+      const size = Math.min(canvasInfo.width, canvasInfo.height) / 2;
+      const left = (canvasInfo.width - size) / 2;
+      const top = (canvasInfo.height - size) / 2;
+      
+      points = [
+        { x: left, y: top },
+        { x: left + size, y: top },
+        { x: left + size, y: top + size },
+        { x: left, y: top + size },
+        { x: left, y: top }
+      ];
+    } else if (drawingType === 'line') {
+      // Draw a diagonal line
+      points = [
+        { x: 0, y: 0 },
+        { x: canvasInfo.width, y: canvasInfo.height }
+      ];
+    } else {
+      // Freestyle - generate a wavy line across the canvas
+      for (let x = 0; x < canvasInfo.width; x += 10) {
+        const y = canvasInfo.height / 2 + Math.sin(x / 20) * 30;
+        points.push({ x, y });
+      }
+    }
+    
+    // Draw on the canvas
+    const drawOptions = { color, lineWidth: 3 };
+    await this.browserController.drawOnCanvas(canvasSelector, points, drawOptions, sessionId);
+    
+    return {
+      success: true,
+      message: `Drew ${drawingType} on canvas`,
+      canvasSelector,
+      drawingType,
+      color
+    };
   }
 }
 

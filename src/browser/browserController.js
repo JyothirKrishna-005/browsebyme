@@ -609,26 +609,67 @@ class BrowserController {
           const rect = element.getBoundingClientRect();
           const computedStyle = window.getComputedStyle(element);
           
+          // Get all attributes as an object
+          const attributes = {};
+          Array.from(element.attributes).forEach(attr => {
+            attributes[attr.name] = attr.value;
+          });
+          
+          // Get text content
+          const textContent = element.textContent?.trim() || '';
+          
+          // Get input value if applicable
+          let value = '';
+          if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA' || element.tagName === 'SELECT') {
+            value = element.value || '';
+          }
+          
+          // Get all ARIA attributes
+          const ariaAttributes = {};
+          for (const attr in element.attributes) {
+            if (attr.startsWith('aria-')) {
+              ariaAttributes[attr] = element.getAttribute(attr);
+            }
+          }
+          
+          // Get parent info for context
+          const parentInfo = element.parentElement ? {
+            tag: element.parentElement.tagName.toLowerCase(),
+            id: element.parentElement.id || null,
+            className: element.parentElement.className || null,
+            textContent: element.parentElement.textContent?.trim().substring(0, 50) || null
+          } : null;
+          
           return {
             tag: element.tagName.toLowerCase(),
             id: element.id || null,
+            name: element.getAttribute('name') || null,
             className: element.className || null,
             type: element.getAttribute('type') || null,
-            name: element.getAttribute('name') || null,
-            value: element.value || element.textContent?.trim() || null,
+            value: value,
             placeholder: element.getAttribute('placeholder') || null,
             ariaLabel: element.getAttribute('aria-label') || null,
+            title: element.getAttribute('title') || null,
+            alt: element.getAttribute('alt') || null,
+            role: element.getAttribute('role') || null,
+            textContent: textContent.substring(0, 100), // Limit text length
+            innerText: element.innerText?.trim().substring(0, 100) || null,
+            isContentEditable: element.isContentEditable,
+            attributes: attributes,
+            ariaAttributes: ariaAttributes,
+            parent: parentInfo,
             visible: !(computedStyle.display === 'none' || computedStyle.visibility === 'hidden' || rect.width === 0 || rect.height === 0),
             position: {
               x: rect.x,
               y: rect.y,
               width: rect.width,
-              height: rect.height
+              height: rect.height,
+              top: rect.top,
+              left: rect.left,
+              bottom: rect.bottom,
+              right: rect.right
             },
-            attributes: Array.from(element.attributes).map(attr => ({
-              name: attr.name,
-              value: attr.value
-            })),
+            zIndex: parseInt(computedStyle.zIndex) || 0,
             xpath: getXPath(element)
           };
         };
@@ -661,23 +702,66 @@ class BrowserController {
           return xpath;
         };
         
-        // Get all interactive elements
-        const interactiveElements = Array.from(document.querySelectorAll(
-          'button, a, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="menuitem"], [tabindex]:not([tabindex="-1"])'
-        )).map(getElementInfo);
+        // Get ALL elements (not just interactive ones)
+        const allElements = document.querySelectorAll('*');
+        const elementData = Array.from(allElements).map(getElementInfo);
+        
+        // Get focused element
+        const focusedElement = document.activeElement ? getElementInfo(document.activeElement) : null;
+        
+        // Get all forms and their fields for better form understanding
+        const forms = Array.from(document.forms).map(form => {
+          return {
+            id: form.id || null,
+            name: form.name || null,
+            action: form.action || null,
+            method: form.method || null,
+            fields: Array.from(form.elements).map(field => {
+              return {
+                type: field.type || null,
+                name: field.name || null,
+                id: field.id || null,
+                value: field.value || null,
+                placeholder: field.placeholder || null,
+                required: field.required || false,
+                disabled: field.disabled || false
+              };
+            })
+          };
+        });
+        
+        // Get canvas elements for drawing operations
+        const canvasElements = Array.from(document.querySelectorAll('canvas')).map(canvas => {
+          return {
+            id: canvas.id || null,
+            width: canvas.width,
+            height: canvas.height,
+            position: canvas.getBoundingClientRect()
+          };
+        });
         
         return {
           title: document.title,
           url: window.location.href,
-          interactiveElements: interactiveElements.filter(el => el.visible)
+          focusedElement: focusedElement,
+          visibleElements: elementData.filter(el => el.visible).slice(0, 100), // Limit to 100 visible elements
+          allElements: elementData.slice(0, 500), // Limit to 500 elements total for performance
+          forms: forms,
+          canvasElements: canvasElements
         };
       });
       
       // Cache elements for future lookups
-      for (const element of structure.interactiveElements) {
+      for (const element of structure.visibleElements) {
         const selector = this.buildSelectorFromElement(element);
-        if (selector && element.value) {
-          this.elementCache.set(selector, { text: element.value });
+        if (selector && element.textContent) {
+          this.elementCache.set(selector, { 
+            text: element.textContent,
+            tag: element.tag,
+            id: element.id,
+            name: element.name,
+            attributes: element.attributes 
+          });
         }
       }
       
@@ -694,30 +778,61 @@ class BrowserController {
    * @returns {string} CSS selector
    */
   buildSelectorFromElement(element) {
+    if (!element) return null;
+    
+    // Try ID first (most specific)
     if (element.id) {
       return `#${element.id}`;
     }
     
-    // Use specific attributes to create precise selectors
+    // Use name attribute if available
     if (element.name) {
       return `${element.tag}[name="${element.name}"]`;
     }
     
+    // Use ARIA attributes which are often reliable
     if (element.ariaLabel) {
       return `[aria-label="${element.ariaLabel}"]`;
     }
     
+    if (element.attributes && element.attributes['aria-labelledby']) {
+      return `[aria-labelledby="${element.attributes['aria-labelledby']}"]`;
+    }
+    
+    // Form elements by placeholder
     if (element.placeholder) {
       return `[placeholder="${element.placeholder}"]`;
     }
     
-    // Check for data attributes
-    const dataAttr = element.attributes.find(attr => attr.name.startsWith('data-'));
-    if (dataAttr) {
-      return `[${dataAttr.name}="${dataAttr.value}"]`;
+    // Use title or alt text for images and other elements
+    if (element.title) {
+      return `[title="${element.title}"]`;
     }
     
-    // Use class name if available
+    if (element.alt) {
+      return `[alt="${element.alt}"]`;
+    }
+    
+    // Check for data attributes which are often used for testing
+    if (element.attributes) {
+      for (const [name, value] of Object.entries(element.attributes)) {
+        if (name.startsWith('data-')) {
+          return `[${name}="${value}"]`;
+        }
+      }
+    }
+    
+    // Use role attribute
+    if (element.role) {
+      return `[role="${element.role}"]`;
+    }
+    
+    // Use text content for buttons and links
+    if ((element.tag === 'button' || element.tag === 'a') && element.textContent) {
+      return `${element.tag}:has-text("${element.textContent}")`;
+    }
+    
+    // Use classes as a last resort
     if (element.className && typeof element.className === 'string') {
       const classes = element.className.split(' ').filter(c => c.trim());
       if (classes.length > 0) {
@@ -826,6 +941,173 @@ class BrowserController {
       });
     }
     return sessions;
+  }
+
+  /**
+   * Draw on a canvas element
+   * @param {string} selector - Canvas element selector
+   * @param {Array} path - Array of points to draw [{x, y}, ...]
+   * @param {object} options - Drawing options (color, lineWidth, etc.)
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Success status
+   */
+  async drawOnCanvas(selector, path, options = {}, sessionId) {
+    try {
+      const session = this.getSession(sessionId);
+      
+      // Find the canvas element
+      const canvasSelector = await this.findBestSelector(selector, sessionId);
+      if (!canvasSelector) {
+        throw new Error(`Could not find canvas matching: ${selector}`);
+      }
+      
+      // Set default options
+      const drawingOptions = {
+        color: options.color || '#000000',
+        lineWidth: options.lineWidth || 2,
+        lineCap: options.lineCap || 'round',
+        lineJoin: options.lineJoin || 'round'
+      };
+      
+      // Drawing script
+      const result = await session.page.evaluate(
+        ({ canvasSelector, path, options }) => {
+          const canvas = document.querySelector(canvasSelector);
+          if (!canvas) return { success: false, error: 'Canvas not found' };
+          
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return { success: false, error: 'Could not get canvas context' };
+          
+          // Set drawing styles
+          ctx.strokeStyle = options.color;
+          ctx.lineWidth = options.lineWidth;
+          ctx.lineCap = options.lineCap;
+          ctx.lineJoin = options.lineJoin;
+          
+          // Start drawing
+          ctx.beginPath();
+          
+          // Move to first point
+          if (path.length > 0) {
+            ctx.moveTo(path[0].x, path[0].y);
+          }
+          
+          // Draw lines to subsequent points
+          for (let i = 1; i < path.length; i++) {
+            ctx.lineTo(path[i].x, path[i].y);
+          }
+          
+          // Stroke the path
+          ctx.stroke();
+          
+          return { success: true };
+        },
+        { canvasSelector, path, options: drawingOptions }
+      );
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to draw on canvas');
+      }
+      
+      logger.info(`Drew on canvas: ${canvasSelector} (${sessionId})`);
+      return { success: true };
+    } catch (error) {
+      logger.error(`Draw on canvas error: ${error.message}`);
+      throw new Error(`Failed to draw on canvas: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Find elements by name or attribute text (not just by selector)
+   * @param {string} nameOrText - Text to search for in element names/attributes/content
+   * @param {string} sessionId - Browser session ID
+   * @returns {Array} Matching elements
+   */
+  async findElementsByNameOrText(nameOrText, sessionId) {
+    try {
+      const session = this.getSession(sessionId);
+      
+      // Get the page structure first
+      const pageStructure = await this.getPageStructure(sessionId);
+      
+      // Filter elements by name, attribute text, or content text
+      const searchText = nameOrText.toLowerCase();
+      const matchingElements = pageStructure.visibleElements.filter(el => {
+        // Check name attribute
+        if (el.name && el.name.toLowerCase().includes(searchText)) return true;
+        
+        // Check ID attribute
+        if (el.id && el.id.toLowerCase().includes(searchText)) return true;
+        
+        // Check text content
+        if (el.textContent && el.textContent.toLowerCase().includes(searchText)) return true;
+        
+        // Check aria label
+        if (el.ariaLabel && el.ariaLabel.toLowerCase().includes(searchText)) return true;
+        
+        // Check placeholder
+        if (el.placeholder && el.placeholder.toLowerCase().includes(searchText)) return true;
+        
+        // Check title
+        if (el.title && el.title.toLowerCase().includes(searchText)) return true;
+        
+        // Check alt text
+        if (el.alt && el.alt.toLowerCase().includes(searchText)) return true;
+        
+        return false;
+      });
+      
+      // Generate selectors for the matching elements
+      const results = matchingElements.map(el => {
+        const selector = this.buildSelectorFromElement(el);
+        return {
+          element: el,
+          selector: selector,
+          score: this.calculateElementMatchScore(el, searchText)
+        };
+      });
+      
+      // Sort by score (higher is better)
+      results.sort((a, b) => b.score - a.score);
+      
+      return results;
+    } catch (error) {
+      logger.error(`Find elements by name/text error: ${error.message}`);
+      throw new Error(`Failed to find elements by name/text: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Calculate how well an element matches the search text
+   * @param {object} element - Element information
+   * @param {string} searchText - Text to search for
+   * @returns {number} Match score (higher is better)
+   */
+  calculateElementMatchScore(element, searchText) {
+    let score = 0;
+    
+    // Exact matches are weighted more heavily
+    if (element.name && element.name.toLowerCase() === searchText) score += 100;
+    if (element.id && element.id.toLowerCase() === searchText) score += 100;
+    if (element.textContent && element.textContent.toLowerCase() === searchText) score += 80;
+    if (element.ariaLabel && element.ariaLabel.toLowerCase() === searchText) score += 90;
+    if (element.placeholder && element.placeholder.toLowerCase() === searchText) score += 85;
+    
+    // Partial matches
+    if (element.name && element.name.toLowerCase().includes(searchText)) score += 50;
+    if (element.id && element.id.toLowerCase().includes(searchText)) score += 50;
+    if (element.textContent && element.textContent.toLowerCase().includes(searchText)) score += 40;
+    if (element.ariaLabel && element.ariaLabel.toLowerCase().includes(searchText)) score += 45;
+    if (element.placeholder && element.placeholder.toLowerCase().includes(searchText)) score += 40;
+    
+    // Boost interactive elements
+    if (element.tag === 'button' || element.tag === 'a' || element.tag === 'input') score += 30;
+    if (element.role === 'button' || element.role === 'link') score += 25;
+    
+    // Penalize hidden elements
+    if (!element.visible) score -= 100;
+    
+    return score;
   }
 }
 
