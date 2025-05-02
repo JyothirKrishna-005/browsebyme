@@ -246,56 +246,197 @@ class CommandParser {
    * @returns {object} Command execution result
    */
   async executeAICommand(aiCommand) {
-    logger.info(`Executing AI command: ${JSON.stringify(aiCommand)}`);
-    
-    switch (aiCommand.action) {
-      case 'navigate':
-        return await this.handleNavigateCommand(aiCommand.url || '', {
-          url: aiCommand.url
-        });
+    try {
+      if (!aiCommand || typeof aiCommand !== 'object') {
+        throw new Error('Invalid AI command format');
+      }
       
-      case 'click':
-        return await this.handleClickCommand('', {
-          selector: aiCommand.selector,
-          target: aiCommand.target
-        });
+      const action = aiCommand.action;
+      if (!action) {
+        throw new Error('AI command missing required action field');
+      }
       
-      case 'type':
-        return await this.handleTypeCommand('', {
-          selector: aiCommand.selector,
-          text: aiCommand.value,
-          target: aiCommand.target
-        });
+      logger.info(`Executing AI command: ${action}`);
       
-      case 'search':
-        return await this.handleSearchCommand(aiCommand.value || '', {
-          query: aiCommand.value
-        });
+      switch (action.toLowerCase()) {
+        case 'navigate':
+        case 'go':
+          // Ensure URL is provided and valid
+          if (!aiCommand.url) {
+            throw new Error('Navigate command missing required URL');
+          }
+          
+          // Ensure URL has protocol
+          let url = aiCommand.url;
+          if (!url.startsWith('http')) {
+            url = 'https://' + url;
+          }
+          
+          return await this.browserController.navigateTo(url, this.activeSession);
+          
+        case 'click':
+          // Ensure target or selector is provided
+          const clickTarget = aiCommand.selector || aiCommand.target;
+          if (!clickTarget) {
+            throw new Error('Click command missing required selector or target');
+          }
+          
+          return await this.browserController.clickElement(clickTarget, this.activeSession);
+          
+        case 'type':
+        case 'fill':
+        case 'input':
+          // Ensure both field and value are provided
+          const typeTarget = aiCommand.selector || aiCommand.field || aiCommand.target;
+          const typeValue = aiCommand.value || aiCommand.text;
+          
+          if (!typeTarget) {
+            throw new Error('Type command missing required selector or field');
+          }
+          
+          if (typeValue === undefined || typeValue === null) {
+            throw new Error('Type command missing required value or text');
+          }
+          
+          return await this.browserController.fillField(typeTarget, typeValue.toString(), this.activeSession);
+          
+        case 'search':
+          // Ensure query is provided
+          const searchQuery = aiCommand.query || aiCommand.text || aiCommand.value;
+          if (!searchQuery) {
+            throw new Error('Search command missing required query');
+          }
+          
+          const searchField = aiCommand.selector || aiCommand.field || 'input[type="search"], input[name="q"], #search';
+          
+          // First fill the search field
+          await this.browserController.fillField(searchField, searchQuery, this.activeSession);
+          
+          // Then submit the search
+          const submitSelector = aiCommand.submitSelector || 'input[type="submit"], button[type="submit"], button:has-text("Search")';
+          return await this.browserController.clickElement(submitSelector, this.activeSession);
+          
+        case 'select':
+          // Ensure both selector and option are provided
+          if (!aiCommand.selector) {
+            throw new Error('Select command missing required selector');
+          }
+          
+          const selectOption = aiCommand.option || aiCommand.value || aiCommand.text;
+          if (!selectOption) {
+            throw new Error('Select command missing required option or value');
+          }
+          
+          // Use executeScript to select the option
+          return await this.browserController.executeScript(
+            `const select = document.querySelector('${aiCommand.selector}');
+             if (!select) throw new Error('Select element not found');
+             
+             // Try to find the option by value, text, or index
+             const optionText = '${selectOption}';
+             let found = false;
+             
+             // Try by value
+             for (const option of select.options) {
+               if (option.value === optionText || option.text === optionText) {
+                 select.value = option.value;
+                 found = true;
+                 break;
+               }
+             }
+             
+             // If not found, try by text content
+             if (!found) {
+               for (const option of select.options) {
+                 if (option.textContent.includes(optionText)) {
+                   select.value = option.value;
+                   found = true;
+                   break;
+                 }
+               }
+             }
+             
+             // Dispatch change event
+             select.dispatchEvent(new Event('change', { bubbles: true }));
+             return found;`,
+            this.activeSession
+          );
+          
+        case 'screenshot':
+          return await this.browserController.takeScreenshot(this.activeSession);
+          
+        case 'wait':
+          const waitTime = parseInt(aiCommand.time || aiCommand.duration || '2000', 10);
+          
+          // Wait using browser controller
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          
+          return { success: true, message: `Waited for ${waitTime}ms` };
+          
+        case 'scroll':
+          const direction = (aiCommand.direction || 'down').toLowerCase();
+          const amount = parseInt(aiCommand.amount || '300', 10);
+          
+          // Use executeScript to scroll
+          return await this.browserController.executeScript(
+            `if ('${direction}' === 'up') {
+               window.scrollBy(0, -${amount});
+             } else if ('${direction}' === 'down') {
+               window.scrollBy(0, ${amount});
+             } else if ('${direction}' === 'left') {
+               window.scrollBy(-${amount}, 0);
+             } else if ('${direction}' === 'right') {
+               window.scrollBy(${amount}, 0);
+             }
+             return true;`,
+            this.activeSession
+          );
+          
+        case 'back':
+          // Go back in history
+          return await this.browserController.executeScript(
+            `window.history.back(); return true;`,
+            this.activeSession
+          );
+          
+        case 'forward':
+          // Go forward in history
+          return await this.browserController.executeScript(
+            `window.history.forward(); return true;`,
+            this.activeSession
+          );
+          
+        case 'reload':
+        case 'refresh':
+          // Reload the page
+          return await this.browserController.executeScript(
+            `location.reload(); return true;`,
+            this.activeSession
+          );
+          
+        default:
+          // Try to use traditional command processing as fallback
+          return await this.executeCommand(aiCommand.originalCommand || action, this.activeSession);
+      }
+    } catch (error) {
+      logger.error(`AI command execution error: ${error.message}`);
       
-      case 'scroll':
-        return await this.handleScrollCommand('', {
-          direction: aiCommand.direction,
-          amount: aiCommand.amount
-        });
+      // Attempt to recover with a more basic action if possible
+      if (error.message.includes('missing required URL') && aiCommand.originalCommand) {
+        // Try to extract a URL from the original command
+        try {
+          const extractedUrl = this.extractUrl(aiCommand.originalCommand);
+          if (extractedUrl) {
+            logger.info(`Recovered URL from original command: ${extractedUrl}`);
+            return await this.browserController.navigateTo(extractedUrl, this.activeSession);
+          }
+        } catch (e) {
+          // Ignore extraction errors
+        }
+      }
       
-      case 'wait':
-        return await this.handleWaitCommand('', {
-          duration: aiCommand.duration
-        });
-      
-      case 'screenshot':
-        return await this.handleScreenshotCommand('');
-      
-      case 'book':
-        return await this.handleBookCommand(aiCommand.value || '', {
-          details: aiCommand
-        });
-      
-      case 'close':
-        return await this.handleCloseCommand(aiCommand.target === 'all' ? 'close all' : 'close');
-      
-      default:
-        throw new Error(`Unknown AI command action: ${aiCommand.action}`);
+      // If we're here, we couldn't recover - throw the error
+      throw new Error(`Command execution failed: ${error.message}`);
     }
   }
 
@@ -670,399 +811,6 @@ class CommandParser {
       return 'input[name="username"], input[id="username"], input[placeholder*="username" i], input[name="user"]';
     } else if (targetLower.includes('text') || targetLower.includes('input') || targetLower.includes('field')) {
       return 'input:visible, textarea:visible';
-    }
-    
-    return null;
-  }
-
-  /**
-   * Handle "search" commands
-   * @param {string} command - Text command
-   * @param {object} options - Additional options from AI processing
-   * @returns {object} Command execution result
-   */
-  async handleSearchCommand(command, options = {}) {
-    // Extract search query or use the one provided by AI
-    const query = options.query || this.extractSearchQuery(command);
-    
-    if (!query) {
-      throw new Error('No search query found. Please specify what to search for, e.g., "search for best laptops".');
-    }
-    
-    // Check if we have an active session, create one if not
-    if (!this.activeSession) {
-      const session = await this.browserController.launchBrowser();
-      this.activeSession = session.sessionId;
-    }
-    
-    // Navigate to Google and perform search
-    await this.browserController.navigateTo('https://www.google.com', this.activeSession);
-    
-    // Give the page a moment to load fully
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Try to find and fill the search box using standard selectors
-    try {
-      // Get a reference to the session and page
-      const session = this.browserController.getSession(this.activeSession);
-      
-      // Use a clear simple selector for the search input
-      await this.browserController.fillField('input[name="q"]', query, this.activeSession);
-      
-      // Try to click the search button
-      try {
-        // Try multiple selectors for search button, one at a time
-        await this.browserController.executeScript(`
-          const searchInput = document.querySelector('input[name="q"]');
-          if (searchInput) {
-            searchInput.value = "${query.replace(/"/g, '\\"')}";
-            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-            
-            // Try to find the search button with various selectors
-            const searchButtons = [
-              document.querySelector('input[name="btnK"]'),
-              document.querySelector('button[name="btnK"]'),
-              document.querySelector('input[type="submit"]'),
-              document.querySelector('button[type="submit"]'),
-              ...document.querySelectorAll('input[type="submit"]'),
-              ...document.querySelectorAll('button[type="submit"]')
-            ].filter(Boolean);
-            
-            if (searchButtons.length > 0) {
-              // Click the first available button
-              searchButtons[0].click();
-            } else {
-              // If no button found, submit the form
-              const form = searchInput.closest('form');
-              if (form) form.submit();
-              
-              // As a last resort, press Enter on the input
-              searchInput.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Enter',
-                code: 'Enter',
-                keyCode: 13,
-                which: 13,
-                bubbles: true
-              }));
-            }
-          }
-        `, this.activeSession);
-      } catch (clickError) {
-        // If clicking failed, log the error and continue
-        console.log("Error during search button click:", clickError);
-        
-        // As a backup, try pressing Enter via the fill field method
-        await this.browserController.executeScript(`
-          const input = document.querySelector('input[name="q"]');
-          if (input) {
-            input.focus();
-            const event = new KeyboardEvent('keydown', { 
-              'key': 'Enter', 
-              'code': 'Enter', 
-              'keyCode': 13, 
-              'which': 13, 
-              'bubbles': true 
-            });
-            input.dispatchEvent(event);
-          }
-        `, this.activeSession);
-      }
-      
-      // Wait for search results to load
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-    } catch (error) {
-      logger.error(`Search error: ${error.message}`);
-      throw new Error(`Failed to perform search: ${error.message}`);
-    }
-    
-    return {
-      action: 'search',
-      query,
-      message: `Searched for "${query}"`
-    };
-  }
-
-  /**
-   * Handle "book" commands
-   * @param {string} command - Text command
-   * @param {object} options - Additional options from AI processing
-   * @returns {object} Command execution result
-   */
-  async handleBookCommand(command, options = {}) {
-    // Check if we have an active session
-    if (!this.activeSession) {
-      throw new Error('No active browser session. Try "open chrome" first.');
-    }
-    
-    // Extract booking details using NLP or use what AI provided
-    const entities = options.details || extractEntities(command);
-    
-    // Create a description of what we understand
-    let bookingDescription = 'Booking task initiated:';
-    
-    if (entities.products && entities.products.length > 0) {
-      bookingDescription += `\n- Product: ${entities.products[0]}`;
-    }
-    
-    if (entities.numbers && entities.numbers.length > 0) {
-      bookingDescription += `\n- Quantity: ${entities.numbers[0]}`;
-    }
-    
-    if (entities.dates && entities.dates.length > 0) {
-      bookingDescription += `\n- Date: ${entities.dates[0]}`;
-    }
-    
-    if (entities.times && entities.times.length > 0) {
-      bookingDescription += `\n- Time: ${entities.times[0]}`;
-    }
-    
-    if (entities.locations && entities.locations.length > 0) {
-      bookingDescription += `\n- Location: ${entities.locations[0]}`;
-    }
-    
-    // For a booking task, we'd have to implement site-specific flows
-    // This is a complex task that would require more specific implementations
-    // For now, we'll just return the entities we've extracted
-    
-    return {
-      action: 'book',
-      entities,
-      message: bookingDescription,
-      note: 'Complex booking tasks require additional implementation'
-    };
-  }
-
-  /**
-   * Handle "close" commands
-   * @param {string} command - Text command
-   * @returns {object} Command execution result
-   */
-  async handleCloseCommand(command) {
-    // Check if we're closing all browsers
-    const closeAll = command.includes('all');
-    
-    if (closeAll) {
-      await this.browserController.closeAll();
-      this.activeSession = null;
-      
-      return {
-        action: 'close',
-        target: 'all',
-        message: 'Closed all browser sessions'
-      };
-    } else if (this.activeSession) {
-      await this.browserController.closeBrowser(this.activeSession);
-      this.activeSession = null;
-      
-      return {
-        action: 'close',
-        target: 'active',
-        message: 'Closed active browser session'
-      };
-    } else {
-      throw new Error('No active browser session to close');
-    }
-  }
-
-  /**
-   * Handle "screenshot" commands
-   * @param {string} command - Text command
-   * @returns {object} Command execution result
-   */
-  async handleScreenshotCommand(command) {
-    // Check if we have an active session
-    if (!this.activeSession) {
-      throw new Error('No active browser session. Try "open chrome" first.');
-    }
-    
-    // Take screenshot
-    const screenshot = await this.browserController.takeScreenshot(this.activeSession);
-    
-    // In a real application, we would save this somewhere or return it to the client
-    // For now, just return a success message
-    return {
-      action: 'screenshot',
-      message: 'Screenshot captured successfully'
-    };
-  }
-
-  /**
-   * Handle "scroll" commands
-   * @param {string} command - Text command
-   * @param {object} options - Additional options from AI processing
-   * @returns {object} Command execution result
-   */
-  async handleScrollCommand(command, options = {}) {
-    // Check if we have an active session
-    if (!this.activeSession) {
-      throw new Error('No active browser session. Try "open chrome" first.');
-    }
-    
-    const session = this.browserController.getSession(this.activeSession);
-    
-    // Determine scroll direction and amount
-    let scrollY = 500; // Default scroll amount
-    let scrollX = 0;
-    
-    if (options.direction === 'down' || command.includes('down')) {
-      scrollY = options.amount || 500;
-    } else if (options.direction === 'up' || command.includes('up')) {
-      scrollY = -(options.amount || 500);
-    } else if (options.direction === 'left' || command.includes('left')) {
-      scrollX = -(options.amount || 500);
-      scrollY = 0;
-    } else if (options.direction === 'right' || command.includes('right')) {
-      scrollX = options.amount || 500;
-      scrollY = 0;
-    }
-    
-    // Check for specific amounts
-    const numberMatch = command.match(/(\d+)\s*(px|pixels)?/i);
-    if (numberMatch) {
-      const amount = parseInt(numberMatch[1], 10);
-      if (command.includes('up')) {
-        scrollY = -amount;
-      } else if (command.includes('left')) {
-        scrollX = -amount;
-        scrollY = 0;
-      } else if (command.includes('right')) {
-        scrollX = amount;
-        scrollY = 0;
-      } else {
-        scrollY = amount;
-      }
-    }
-    
-    // Scroll the page
-    await session.page.evaluate(({ x, y }) => {
-      window.scrollBy(x, y);
-    }, { x: scrollX, y: scrollY });
-    
-    return {
-      action: 'scroll',
-      direction: scrollY > 0 ? 'down' : scrollY < 0 ? 'up' : scrollX > 0 ? 'right' : 'left',
-      amount: Math.abs(scrollY || scrollX),
-      message: `Scrolled ${scrollY > 0 ? 'down' : scrollY < 0 ? 'up' : scrollX > 0 ? 'right' : 'left'} by ${Math.abs(scrollY || scrollX)}px`
-    };
-  }
-
-  /**
-   * Handle "wait" commands
-   * @param {string} command - Text command
-   * @param {object} options - Additional options from AI processing
-   * @returns {object} Command execution result
-   */
-  async handleWaitCommand(command, options = {}) {
-    // Check if we have an active session
-    if (!this.activeSession) {
-      throw new Error('No active browser session. Try "open chrome" first.');
-    }
-    
-    // Determine wait time
-    let waitTime = options.duration || 2000; // Default: 2 seconds
-    
-    const numberMatch = command.match(/(\d+)\s*(s|sec|seconds|ms|milliseconds)?/i);
-    if (numberMatch) {
-      const amount = parseInt(numberMatch[1], 10);
-      const unit = numberMatch[2] ? numberMatch[2].toLowerCase() : 's';
-      
-      if (unit === 'ms' || unit === 'milliseconds') {
-        waitTime = amount;
-      } else {
-        waitTime = amount * 1000; // Convert seconds to milliseconds
-      }
-    }
-    
-    // Cap wait time at 30 seconds for safety
-    waitTime = Math.min(waitTime, 30000);
-    
-    // Wait
-    await new Promise(resolve => setTimeout(resolve, waitTime));
-    
-    return {
-      action: 'wait',
-      duration: waitTime,
-      message: `Waited for ${waitTime / 1000} seconds`
-    };
-  }
-
-  /**
-   * Extract URL from command
-   * @param {string} command - Text command
-   * @returns {string|null} Extracted URL or null
-   */
-  extractUrl(command) {
-    // First pattern: Match common URL patterns with or without protocol
-    const urlPattern = /(?:https?:\/\/)?(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)/i;
-    const urlMatch = command.match(urlPattern);
-    
-    if (urlMatch) {
-      return urlMatch[0];
-    }
-    
-    // Second pattern: Look for URLs after common phrases
-    const phrasePattern = /(?:go to|open|visit|navigate to|browse)\s+(?:https?:\/\/)?([a-zA-Z0-9][-a-zA-Z0-9]*\.)?[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:\/[-a-zA-Z0-9:%_\+.~#?&//=]*)?/i;
-    const phraseMatch = command.match(phrasePattern);
-    
-    if (phraseMatch) {
-      // Extract the domain part
-      const urlPart = phraseMatch[0].split(/\s+/).slice(-1)[0];
-      return urlPart;
-    }
-    
-    return null;
-  }
-
-  /**
-   * Extract selector from command
-   * @param {string} command - Text command
-   * @returns {string|null} Extracted selector or null
-   */
-  extractSelector(command) {
-    // Look for common UI element descriptions
-    if (command.includes('button')) {
-      // Try to extract a specific button text
-      const buttonTextMatch = command.match(/(?:button|btn)(?:\s+(?:with|that says|labeled|containing))?\s+['"]?([^'"]+)['"]?/i);
-      if (buttonTextMatch) {
-        const buttonText = buttonTextMatch[1].trim();
-        return `button:has-text("${buttonText}"), [role="button"]:has-text("${buttonText}"), input[type="button"][value*="${buttonText}" i], .button:has-text("${buttonText}")`;
-      }
-      return 'button, input[type="button"], input[type="submit"], [role="button"]';
-    } else if (command.includes('search box') || command.includes('search field')) {
-      return 'input[type="search"], input[name="q"], input[placeholder*="search" i], [aria-label*="search" i]';
-    } else if (command.includes('link')) {
-      // Extract link text
-      const linkTextMatch = command.match(/link\s+(?:with|that says|saying|containing|to)\s+['"]?([^'"]+)['"]?/i);
-      if (linkTextMatch) {
-        const linkText = linkTextMatch[1].trim();
-        return `a:has-text("${linkText}"), a[href*="${linkText}" i], a[title*="${linkText}" i]`;
-      }
-      return 'a';
-    } else if (command.includes('input') || command.includes('field') || command.includes('box') || command.includes('form')) {
-      // Try to extract a specific field type or label
-      if (command.includes('username') || command.includes('user name')) {
-        return 'input[name="username"], input[id="username"], input[placeholder*="username" i], input[type="text"]';
-      } else if (command.includes('password')) {
-        return 'input[type="password"]';
-      } else if (command.includes('email')) {
-        return 'input[type="email"], input[name="email"], input[placeholder*="email" i]';
-      } else if (command.includes('search')) {
-        return 'input[type="search"], input[name="q"], input[placeholder*="search" i]';
-      }
-      return 'input, textarea';
-    } else if (command.includes('checkbox')) {
-      return 'input[type="checkbox"]';
-    } else if (command.includes('radio')) {
-      return 'input[type="radio"]';
-    } else if (command.includes('dropdown') || command.includes('select')) {
-      return 'select';
-    } else if (command.includes('submit')) {
-      return 'button[type="submit"], input[type="submit"]';
-    } else if (command.includes('image')) {
-      return 'img';
-    } else if (command.includes('video')) {
-      return 'video';
     }
     
     return null;
