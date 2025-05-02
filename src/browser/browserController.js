@@ -1109,6 +1109,845 @@ class BrowserController {
     
     return score;
   }
+
+  /**
+   * Analyze the context of the page and find the most appropriate element based on context
+   * @param {string} description - Description of the element to find
+   * @param {string} context - Context hint (e.g., "product search", "city search")
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Best matching element and its selector
+   */
+  async findElementInContext(description, context, sessionId) {
+    try {
+      const session = this.getSession(sessionId);
+      
+      // Get the current URL to understand website context
+      const currentUrl = await session.page.url();
+      const urlLower = currentUrl.toLowerCase();
+      
+      // Get all potential matching elements
+      const matchingElements = await this.findElementsByNameOrText(description, sessionId);
+      
+      if (matchingElements.length === 0) {
+        return null;
+      }
+      
+      // Boost scores based on context
+      const contextualResults = matchingElements.map(result => {
+        let contextScore = result.score;
+        const el = result.element;
+        
+        // E-commerce context adjustments
+        if (context === 'product search' || urlLower.includes('amazon') || 
+            urlLower.includes('ebay') || urlLower.includes('walmart')) {
+          // Favor search boxes near the top of the page
+          if (el.position.y < 200 && 
+              (el.tag === 'input' || el.placeholder?.toLowerCase().includes('search'))) {
+            contextScore += 50;
+          }
+          
+          // Favor search boxes with shopping-related attributes
+          if (el.placeholder?.toLowerCase().includes('product') || 
+              el.name?.toLowerCase().includes('product') ||
+              el.ariaLabel?.toLowerCase().includes('product')) {
+            contextScore += 70;
+          }
+        }
+        
+        // Travel context adjustments
+        if (context === 'city search' || urlLower.includes('booking') || 
+            urlLower.includes('expedia') || urlLower.includes('airbnb')) {
+          // Favor location/city inputs
+          if (el.placeholder?.toLowerCase().includes('city') || 
+              el.placeholder?.toLowerCase().includes('where') ||
+              el.name?.toLowerCase().includes('city') ||
+              el.name?.toLowerCase().includes('destination') ||
+              el.id?.toLowerCase().includes('location')) {
+            contextScore += 70;
+          }
+        }
+        
+        // Form context - boost elements inside the active form
+        if (context === 'form' && el.parent) {
+          const parentTag = el.parent.tag;
+          if (parentTag === 'form') {
+            contextScore += 40;
+          }
+        }
+        
+        return {
+          ...result,
+          contextScore
+        };
+      });
+      
+      // Sort by context-adjusted score
+      contextualResults.sort((a, b) => b.contextScore - a.contextScore);
+      
+      // Return the best match with context consideration
+      return contextualResults[0];
+    } catch (error) {
+      logger.error(`Find element in context error: ${error.message}`);
+      return null;
+    }
+  }
+  
+  /**
+   * Apply filters to a product list (e.g., price range, ratings)
+   * @param {object} filters - Filter criteria
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Filter application results
+   */
+  async applyProductFilters(filters, sessionId) {
+    try {
+      const session = this.getSession(sessionId);
+      const currentUrl = await session.page.url();
+      
+      // Determine the e-commerce platform
+      const platform = this.detectEcommercePlatform(currentUrl);
+      
+      // Initialize results
+      const results = {
+        appliedFilters: [],
+        failedFilters: [],
+        message: ''
+      };
+      
+      // Handle price range filter
+      if (filters.minPrice !== undefined || filters.maxPrice !== undefined) {
+        try {
+          await this.applyPriceRangeFilter(platform, filters.minPrice, filters.maxPrice, sessionId);
+          results.appliedFilters.push('price range');
+        } catch (error) {
+          results.failedFilters.push('price range');
+          logger.error(`Failed to apply price filter: ${error.message}`);
+        }
+      }
+      
+      // Handle sorting
+      if (filters.sortBy) {
+        try {
+          await this.applySorting(platform, filters.sortBy, sessionId);
+          results.appliedFilters.push(`sorting by ${filters.sortBy}`);
+        } catch (error) {
+          results.failedFilters.push(`sorting by ${filters.sortBy}`);
+          logger.error(`Failed to apply sorting: ${error.message}`);
+        }
+      }
+      
+      // Handle rating filter
+      if (filters.minRating) {
+        try {
+          await this.applyRatingFilter(platform, filters.minRating, sessionId);
+          results.appliedFilters.push(`minimum rating of ${filters.minRating} stars`);
+        } catch (error) {
+          results.failedFilters.push(`minimum rating of ${filters.minRating} stars`);
+          logger.error(`Failed to apply rating filter: ${error.message}`);
+        }
+      }
+      
+      // Update result message
+      if (results.appliedFilters.length > 0) {
+        results.message = `Successfully applied filters: ${results.appliedFilters.join(', ')}`;
+      } else {
+        results.message = 'Failed to apply any filters';
+      }
+      
+      if (results.failedFilters.length > 0) {
+        results.message += `. Failed filters: ${results.failedFilters.join(', ')}`;
+      }
+      
+      return results;
+    } catch (error) {
+      logger.error(`Apply product filters error: ${error.message}`);
+      throw new Error(`Failed to apply product filters: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Detect the e-commerce platform from the URL
+   * @param {string} url - Current URL
+   * @returns {string} Platform name ('amazon', 'ebay', 'walmart', 'generic')
+   */
+  detectEcommercePlatform(url) {
+    const urlLower = url.toLowerCase();
+    if (urlLower.includes('amazon')) return 'amazon';
+    if (urlLower.includes('ebay')) return 'ebay';
+    if (urlLower.includes('walmart')) return 'walmart';
+    if (urlLower.includes('bestbuy')) return 'bestbuy';
+    if (urlLower.includes('target')) return 'target';
+    return 'generic';
+  }
+  
+  /**
+   * Apply price range filter based on the platform
+   * @param {number} minPrice - Minimum price
+   * @param {number} maxPrice - Maximum price
+   * @param {string} sessionId - Browser session ID
+   */
+  async applyPriceRangeFilter(platform, minPrice, maxPrice, sessionId) {
+    const session = this.getSession(sessionId);
+    
+    // Generic implementation for all platforms
+    try {
+      // Try to find min price input using common patterns
+      if (minPrice !== undefined) {
+        const minPriceSelectors = [
+          'input[placeholder*="min" i]',
+          'input[name*="min" i]',
+          'input[id*="min" i]',
+          'input[aria-label*="minimum" i]',
+          'input[name*="low" i]',
+          'input[placeholder="Min"]',
+          'input[data-testid*="min" i]'
+        ].join(', ');
+        
+        await this.fillField(minPriceSelectors, minPrice.toString(), sessionId);
+      }
+      
+      // Try to find max price input using common patterns
+      if (maxPrice !== undefined) {
+        const maxPriceSelectors = [
+          'input[placeholder*="max" i]',
+          'input[name*="max" i]',
+          'input[id*="max" i]',
+          'input[aria-label*="maximum" i]',
+          'input[name*="high" i]',
+          'input[placeholder="Max"]',
+          'input[data-testid*="max" i]'
+        ].join(', ');
+        
+        await this.fillField(maxPriceSelectors, maxPrice.toString(), sessionId);
+      }
+      
+      // Try to find and click a submit button
+      const priceSubmitSelectors = [
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button:has-text("Apply")',
+        'button:has-text("Go")',
+        'button:has-text("Filter")',
+        'a:has-text("Apply")',
+        'button[aria-label*="price" i]',
+        'input[aria-labelledby*="announce" i]'
+      ].join(', ');
+      
+      await this.clickElement(priceSubmitSelectors, sessionId);
+      
+      // Wait for the page to update
+      await session.page.waitForLoadState('networkidle', { timeout: 10000 });
+    } catch (error) {
+      logger.warn(`Generic price filter application failed: ${error.message}. Trying alternative approach.`);
+      
+      // Alternative approach: Look for filter sections with price-related text
+      try {
+        // First find price filter section
+        const priceFilterResult = await session.page.evaluate(() => {
+          // Look for headers or section titles containing price-related text
+          const priceTexts = ['price', 'cost', 'amount', '$'];
+          const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], legend'));
+          
+          for (const heading of headings) {
+            const text = heading.textContent.toLowerCase();
+            if (priceTexts.some(pt => text.includes(pt))) {
+              // Found a price-related section, now look for inputs and submit buttons within/after it
+              let section = heading.parentElement;
+              let inputs = Array.from(section.querySelectorAll('input[type="text"], input[type="number"]'));
+              
+              if (inputs.length >= 1) {
+                return {
+                  found: true,
+                  minInput: inputs[0],
+                  maxInput: inputs.length > 1 ? inputs[1] : null
+                };
+              }
+            }
+          }
+          
+          return { found: false };
+        });
+        
+        if (priceFilterResult.found) {
+          // Use JavaScript execution to set values directly if found
+          if (minPrice !== undefined) {
+            await session.page.evaluate((min) => {
+              const priceInputs = Array.from(document.querySelectorAll('input[type="text"], input[type="number"]'));
+              const minInput = priceInputs.find(i => 
+                i.id?.toLowerCase().includes('min') || 
+                i.name?.toLowerCase().includes('min') || 
+                i.placeholder?.toLowerCase().includes('min') ||
+                i.id?.toLowerCase().includes('low') ||
+                i.name?.toLowerCase().includes('low')
+              );
+              
+              if (minInput) {
+                minInput.value = min;
+                minInput.dispatchEvent(new Event('input', { bubbles: true }));
+                minInput.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+            }, minPrice.toString());
+          }
+          
+          if (maxPrice !== undefined) {
+            await session.page.evaluate((max) => {
+              const priceInputs = Array.from(document.querySelectorAll('input[type="text"], input[type="number"]'));
+              const maxInput = priceInputs.find(i => 
+                i.id?.toLowerCase().includes('max') || 
+                i.name?.toLowerCase().includes('max') || 
+                i.placeholder?.toLowerCase().includes('max') ||
+                i.id?.toLowerCase().includes('high') ||
+                i.name?.toLowerCase().includes('high')
+              );
+              
+              if (maxInput) {
+                maxInput.value = max;
+                maxInput.dispatchEvent(new Event('input', { bubbles: true }));
+                maxInput.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+            }, maxPrice.toString());
+          }
+          
+          // Find and click apply/submit button
+          await session.page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a[role="button"]'));
+            const applyButton = buttons.find(b => 
+              b.textContent.toLowerCase().includes('apply') || 
+              b.textContent.toLowerCase().includes('go') ||
+              b.textContent.toLowerCase().includes('filter') || 
+              b.textContent.toLowerCase().includes('submit') ||
+              b.getAttribute('aria-label')?.toLowerCase().includes('apply')
+            );
+            
+            if (applyButton) {
+              applyButton.click();
+            }
+          });
+          
+          // Wait for the page to update
+          await session.page.waitForLoadState('networkidle', { timeout: 10000 });
+        }
+      } catch (altError) {
+        logger.error(`Alternative price filter approach failed: ${altError.message}`);
+        throw new Error(`Could not apply price filters: ${error.message}`);
+      }
+    }
+  }
+  
+  /**
+   * Apply sorting to product listings
+   * @param {string} sortBy - Sort criteria (price-low-high, price-high-low, rating, relevance)
+   * @param {string} sessionId - Browser session ID
+   */
+  async applySorting(platform, sortBy, sessionId) {
+    const session = this.getSession(sessionId);
+    
+    // Normalize the sort criteria
+    const sortCriteria = sortBy.toLowerCase();
+    
+    try {
+      // Step 1: Try to find and click a sort dropdown/button
+      const sortDropdownSelectors = [
+        'select[aria-label*="Sort" i]',
+        'select[id*="sort" i]',
+        'select[name*="sort" i]',
+        'button[aria-label*="Sort" i]',
+        'button[id*="sort" i]',
+        '[data-test*="sort" i]',
+        'span:has-text("Sort by:")',
+        'div[id*="sort" i]',
+        '[aria-label*="sort" i]',
+        'button:has-text("Sort")',
+        '.sort-dropdown'
+      ].join(', ');
+      
+      await this.clickElement(sortDropdownSelectors, sessionId);
+      
+      // Wait for the dropdown to appear
+      await session.page.waitForTimeout(500);
+      
+      // Step 2: Click on the appropriate sort option based on criteria
+      let sortOptionSelector = '';
+      
+      if (sortCriteria.includes('price') && sortCriteria.includes('low')) {
+        // Price low to high
+        sortOptionSelector = [
+          'option[value*="price_asc" i]',
+          'option[value*="price-asc" i]',
+          'option[value*="price_low" i]',
+          'a:has-text("Price: Low to High")',
+          'span:has-text("Price: Low to High")',
+          'li:has-text("Price: Low to High")',
+          '[data-value*="price_asc" i]',
+          '[data-value*="price-asc" i]',
+          '[data-value*="low" i]',
+          'a[href*="price_asc" i]',
+          'a[href*="price-asc" i]'
+        ].join(', ');
+      } else if (sortCriteria.includes('price') && sortCriteria.includes('high')) {
+        // Price high to low
+        sortOptionSelector = [
+          'option[value*="price_desc" i]',
+          'option[value*="price-desc" i]',
+          'option[value*="price_high" i]',
+          'a:has-text("Price: High to Low")',
+          'span:has-text("Price: High to Low")',
+          'li:has-text("Price: High to Low")',
+          '[data-value*="price_desc" i]',
+          '[data-value*="price-desc" i]',
+          '[data-value*="high" i]',
+          'a[href*="price_desc" i]',
+          'a[href*="price-desc" i]'
+        ].join(', ');
+      } else if (sortCriteria.includes('rating') || sortCriteria.includes('review')) {
+        // By ratings
+        sortOptionSelector = [
+          'option[value*="rating" i]',
+          'option[value*="review" i]',
+          'option[value*="review-rank" i]',
+          'a:has-text("Top Rated")',
+          'span:has-text("Customer Rating")',
+          'li:has-text("Best Reviewed")',
+          '[data-value*="rating" i]',
+          '[data-value*="review" i]',
+          'a[href*="rating" i]',
+          'a[href*="review" i]'
+        ].join(', ');
+      } else if (sortCriteria.includes('new') || sortCriteria.includes('recent')) {
+        // By newest
+        sortOptionSelector = [
+          'option[value*="date_desc" i]',
+          'option[value*="date-desc" i]',
+          'option[value*="newest" i]',
+          'option[value*="recently" i]',
+          'a:has-text("Newest")',
+          'span:has-text("Newest")',
+          'li:has-text("Recently")',
+          '[data-value*="date_desc" i]',
+          '[data-value*="date-desc" i]',
+          '[data-value*="newest" i]',
+          'a[href*="date_desc" i]',
+          'a[href*="date-desc" i]',
+          'a[href*="newly" i]'
+        ].join(', ');
+      } else {
+        // Default to relevance
+        sortOptionSelector = [
+          'option[value*="relevance" i]',
+          'option[value*="best_match" i]',
+          'option[value*="best-match" i]',
+          'a:has-text("Relevance")',
+          'span:has-text("Best Match")',
+          'li:has-text("Most Relevant")',
+          '[data-value*="relevance" i]',
+          '[data-value*="featured" i]',
+          '[data-value*="best_match" i]',
+          'a[href*="relevance" i]',
+          'a[href*="best_match" i]',
+          'a[href*="best-match" i]'
+        ].join(', ');
+      }
+      
+      await this.clickElement(sortOptionSelector, sessionId);
+      
+      // Wait for the page to update
+      await session.page.waitForLoadState('networkidle', { timeout: 10000 });
+    } catch (error) {
+      logger.warn(`Primary sorting approach failed: ${error.message}. Trying alternative approach.`);
+      
+      // Alternative approach: Try to find the sorting mechanism directly
+      try {
+        await session.page.evaluate((sortType) => {
+          // Try to find sort controls
+          const sortControls = Array.from(document.querySelectorAll('select, [role="listbox"], [role="combobox"]'));
+          
+          // If we found a dropdown
+          for (const control of sortControls) {
+            // Check if it's a sort control
+            const controlText = control.textContent.toLowerCase();
+            const controlId = control.id ? control.id.toLowerCase() : '';
+            const isSort = controlText.includes('sort') || controlId.includes('sort');
+            
+            if (isSort) {
+              // For dropdowns
+              if (control.tagName === 'SELECT') {
+                const options = Array.from(control.options);
+                
+                // Find matching option
+                let targetOption = null;
+                
+                if (sortType.includes('price') && sortType.includes('low')) {
+                  targetOption = options.find(opt => 
+                    (opt.textContent.toLowerCase().includes('price') && opt.textContent.toLowerCase().includes('low')) ||
+                    (opt.value.toLowerCase().includes('price') && opt.value.toLowerCase().includes('asc'))
+                  );
+                } else if (sortType.includes('price') && sortType.includes('high')) {
+                  targetOption = options.find(opt => 
+                    (opt.textContent.toLowerCase().includes('price') && opt.textContent.toLowerCase().includes('high')) ||
+                    (opt.value.toLowerCase().includes('price') && opt.value.toLowerCase().includes('desc'))
+                  );
+                } else if (sortType.includes('rating') || sortType.includes('review')) {
+                  targetOption = options.find(opt => 
+                    opt.textContent.toLowerCase().includes('rating') || 
+                    opt.textContent.toLowerCase().includes('review') ||
+                    opt.value.toLowerCase().includes('rating') ||
+                    opt.value.toLowerCase().includes('review')
+                  );
+                } else if (sortType.includes('new') || sortType.includes('recent')) {
+                  targetOption = options.find(opt => 
+                    opt.textContent.toLowerCase().includes('new') || 
+                    opt.textContent.toLowerCase().includes('recent') ||
+                    opt.value.toLowerCase().includes('date') ||
+                    opt.value.toLowerCase().includes('new')
+                  );
+                } else {
+                  targetOption = options.find(opt => 
+                    opt.textContent.toLowerCase().includes('relevan') || 
+                    opt.textContent.toLowerCase().includes('featured') ||
+                    opt.textContent.toLowerCase().includes('best match')
+                  );
+                }
+                
+                if (targetOption) {
+                  control.value = targetOption.value;
+                  control.dispatchEvent(new Event('change', { bubbles: true }));
+                  return true;
+                }
+              } 
+              // For custom dropdowns, click to expand
+              else {
+                control.click();
+                return true; // we'll handle the next step separately
+              }
+            }
+          }
+          
+          return false;
+        }, sortCriteria);
+        
+        // If we've clicked to expand a custom dropdown, now click the option
+        await session.page.waitForTimeout(500);
+        
+        // Build option selectors based on sort criteria
+        let optionTextPattern = '';
+        
+        if (sortCriteria.includes('price') && sortCriteria.includes('low')) {
+          optionTextPattern = /(price.*low|low.*price|price.*asc|ascending.*price)/i;
+        } else if (sortCriteria.includes('price') && sortCriteria.includes('high')) {
+          optionTextPattern = /(price.*high|high.*price|price.*desc|descending.*price)/i;
+        } else if (sortCriteria.includes('rating') || sortCriteria.includes('review')) {
+          optionTextPattern = /(rating|review|stars|top rated)/i;
+        } else if (sortCriteria.includes('new') || sortCriteria.includes('recent')) {
+          optionTextPattern = /(newest|recent|latest|new arrivals|date)/i;
+        } else {
+          optionTextPattern = /(relevance|featured|best match|recommended)/i;
+        }
+        
+        await session.page.evaluate((pattern) => {
+          const patternRegex = new RegExp(pattern);
+          const options = Array.from(document.querySelectorAll('li, div[role="option"], a, span, button'));
+          
+          // Find an option that matches our pattern
+          const targetOption = options.find(opt => patternRegex.test(opt.textContent));
+          if (targetOption) {
+            targetOption.click();
+            return true;
+          }
+          
+          return false;
+        }, optionTextPattern.source);
+        
+        // Wait for the page to update after sort change
+        await session.page.waitForLoadState('networkidle', { timeout: 10000 });
+      } catch (altError) {
+        logger.error(`Alternative sorting approach failed: ${altError.message}`);
+        throw new Error(`Could not apply sorting: ${error.message}`);
+      }
+    }
+  }
+  
+  /**
+   * Apply rating filter
+   * @param {number} minRating - Minimum rating (1-5)
+   * @param {string} sessionId - Browser session ID
+   */
+  async applyRatingFilter(platform, minRating, sessionId) {
+    const session = this.getSession(sessionId);
+    
+    try {
+      // Generic approach to find rating filters across different platforms
+      const ratingSelectors = [
+        `input[type="checkbox"][id*="star"][id*="${minRating}"]`,
+        `span:has-text("${minRating} star")`,
+        `label:has-text("${minRating} star")`,
+        `a:has-text("${minRating} star")`,
+        `[aria-label*="${minRating} star"]`,
+        `span:has-text("${minRating} Stars & Up")`,
+        `a:has-text("${minRating} Stars & Up")`,
+        `span:has-text("${minRating}.0")`,
+        `a:has-text("${minRating}.0")`
+      ].join(', ');
+      
+      await this.clickElement(ratingSelectors, sessionId);
+      
+      // Wait for the page to update
+      await session.page.waitForLoadState('networkidle', { timeout: 10000 });
+    } catch (error) {
+      logger.warn(`Primary rating filter approach failed: ${error.message}. Trying alternative approach.`);
+      
+      // Alternative approach: Look for rating filter sections and interact with them directly
+      try {
+        // First find rating filter section
+        const ratingFilterResult = await session.page.evaluate((rating) => {
+          // Look for headers or section titles containing rating-related text
+          const ratingTexts = ['rating', 'stars', 'review', 'customer review'];
+          const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], legend'));
+          
+          for (const heading of headings) {
+            const text = heading.textContent.toLowerCase();
+            if (ratingTexts.some(rt => text.includes(rt))) {
+              // Found a rating-related section, now look for appropriate options
+              let section = heading.closest('section') || heading.closest('div') || heading.parentElement;
+              
+              // Look for star patterns with our rating
+              const ratingPattern = new RegExp(`${rating}\\s*star|${rating}\\s*stars|${rating}\\.0`);
+              
+              // Find clickable elements within the section that match our rating
+              const clickables = Array.from(section.querySelectorAll('input, label, a, button, span[role="button"]'));
+              const matchingElement = clickables.find(el => {
+                // Check the element text
+                const elText = el.textContent.toLowerCase() || '';
+                if (ratingPattern.test(elText)) return true;
+                
+                // Check attributes
+                if (el.id && ratingPattern.test(el.id)) return true;
+                if (el.name && ratingPattern.test(el.name)) return true;
+                if (el.getAttribute('aria-label') && ratingPattern.test(el.getAttribute('aria-label'))) return true;
+                
+                return false;
+              });
+              
+              if (matchingElement) {
+                // Calculate the element's position for a click
+                const rect = matchingElement.getBoundingClientRect();
+                return {
+                  found: true,
+                  x: rect.left + (rect.width / 2),
+                  y: rect.top + (rect.height / 2)
+                };
+              }
+            }
+          }
+          
+          return { found: false };
+        }, minRating);
+        
+        if (ratingFilterResult.found) {
+          // Click at the calculated position
+          await session.page.mouse.click(ratingFilterResult.x, ratingFilterResult.y);
+          
+          // Wait for the page to update
+          await session.page.waitForLoadState('networkidle', { timeout: 10000 });
+        } else {
+          // If we still can't find a suitable element, try one more approach
+          // Look for star rating elements directly
+          await session.page.evaluate((rating) => {
+            // Look for elements with star images or icons
+            const starElements = Array.from(document.querySelectorAll(
+              '[class*="star" i], [id*="star" i], [aria-label*="star" i], [title*="star" i]'
+            ));
+            
+            for (const starEl of starElements) {
+              // Check if this is a filter element
+              const parent = starEl.closest('div') || starEl.parentElement;
+              const text = parent.textContent.toLowerCase();
+              
+              if (text.includes(`${rating} star`) || text.includes(`${rating}.0`) || text.includes(`${rating} and up`)) {
+                // This looks like our target - click it
+                starEl.click();
+                return true;
+              }
+            }
+            
+            return false;
+          }, minRating);
+          
+          // Wait for the page to update
+          await session.page.waitForLoadState('networkidle', { timeout: 10000 });
+        }
+      } catch (altError) {
+        logger.error(`Alternative rating filter approach failed: ${altError.message}`);
+        throw new Error(`Could not apply rating filter: ${error.message}`);
+      }
+    }
+  }
+  
+  /**
+   * Select a product by budget constraints
+   * @param {number} budget - Maximum budget
+   * @param {object} options - Additional selection criteria
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Selected product information
+   */
+  async selectProductByBudget(budget, options = {}, sessionId) {
+    try {
+      const session = this.getSession(sessionId);
+      
+      // Default options
+      const selectionOptions = {
+        preferHighRated: true,
+        preferBestSeller: true,
+        minRating: 4,
+        ...options
+      };
+      
+      // Extract all products with prices from the page
+      const products = await session.page.evaluate((budget) => {
+        // Helper function to extract price from text
+        const extractPrice = (text) => {
+          const priceMatch = text.match(/\$\s*(\d+(?:\.\d+)?)/);
+          return priceMatch ? parseFloat(priceMatch[1]) : null;
+        };
+        
+        // Find all product elements on the page
+        const productElements = Array.from(document.querySelectorAll(
+          '[data-component-type="s-search-result"], .s-result-item, .product-item, .product-card, [data-testid="product-card"]'
+        ));
+        
+        return productElements.map(el => {
+          // Extract price
+          const priceEl = el.querySelector('.a-price, .price, [data-testid="price"]');
+          const priceText = priceEl ? priceEl.textContent : '';
+          const price = extractPrice(priceText);
+          
+          // Extract rating
+          const ratingEl = el.querySelector('.a-star-rating, .rating, [data-testid="rating"]');
+          const ratingText = ratingEl ? ratingEl.textContent : '';
+          const ratingMatch = ratingText.match(/(\d+(?:\.\d+)?)\s*out of\s*(\d+)|(\d+(?:\.\d+)?)\s*stars?/i);
+          const rating = ratingMatch ? parseFloat(ratingMatch[1] || ratingMatch[3]) : null;
+          
+          // Extract title
+          const titleEl = el.querySelector('.a-text-normal, .product-title, [data-testid="title"]');
+          const title = titleEl ? titleEl.textContent.trim() : '';
+          
+          // Check if best seller
+          const isBestSeller = el.textContent.toLowerCase().includes('best seller');
+          
+          // Get the element's position and size
+          const rect = el.getBoundingClientRect();
+          
+          return {
+            price,
+            rating,
+            title,
+            isBestSeller,
+            withinBudget: price !== null && price <= budget,
+            element: el,
+            position: {
+              top: rect.top,
+              left: rect.left
+            }
+          };
+        }).filter(product => product.price !== null); // Filter out products without price
+      }, budget);
+      
+      // Filter products within budget
+      const affordableProducts = products.filter(p => p.withinBudget);
+      
+      if (affordableProducts.length === 0) {
+        return {
+          success: false,
+          message: `No products found within budget of $${budget}`
+        };
+      }
+      
+      // Sort products based on selection criteria
+      let sortedProducts = affordableProducts.slice();
+      
+      if (selectionOptions.preferHighRated) {
+        // Sort by rating (descending)
+        sortedProducts.sort((a, b) => {
+          // First by rating
+          const ratingDiff = (b.rating || 0) - (a.rating || 0);
+          if (ratingDiff !== 0) return ratingDiff;
+          
+          // Then by best seller status
+          if (selectionOptions.preferBestSeller) {
+            if (a.isBestSeller && !b.isBestSeller) return -1;
+            if (!a.isBestSeller && b.isBestSeller) return 1;
+          }
+          
+          // Finally by price (closer to budget is better)
+          return budget - a.price - (budget - b.price);
+        });
+      } else {
+        // Sort by price (descending) to get the most value for money
+        sortedProducts.sort((a, b) => {
+          // First by price
+          const priceDiff = b.price - a.price;
+          if (priceDiff !== 0) return priceDiff;
+          
+          // Then by rating
+          return (b.rating || 0) - (a.rating || 0);
+        });
+      }
+      
+      // Filter by minimum rating if specified
+      if (selectionOptions.minRating > 0) {
+        const highRatedProducts = sortedProducts.filter(p => 
+          p.rating !== null && p.rating >= selectionOptions.minRating
+        );
+        
+        if (highRatedProducts.length > 0) {
+          sortedProducts = highRatedProducts;
+        }
+      }
+      
+      // Select the best product
+      const selectedProduct = sortedProducts[0];
+      
+      // Click on the selected product
+      await session.page.evaluate((position) => {
+        // Find element at this position
+        const elementAtPosition = document.elementFromPoint(
+          position.left + 10, 
+          position.top + 10
+        );
+        
+        if (elementAtPosition) {
+          // Find the closest clickable ancestor
+          let clickableElement = elementAtPosition;
+          while (clickableElement && clickableElement.tagName !== 'A' && 
+                 clickableElement.tagName !== 'BUTTON') {
+            clickableElement = clickableElement.parentElement;
+          }
+          
+          // Click the element
+          if (clickableElement) {
+            clickableElement.click();
+          } else {
+            elementAtPosition.click();
+          }
+        }
+      }, selectedProduct.position);
+      
+      // Wait for the page to navigate
+      await session.page.waitForNavigation({ timeout: 10000 });
+      
+      return {
+        success: true,
+        product: {
+          title: selectedProduct.title,
+          price: selectedProduct.price,
+          rating: selectedProduct.rating,
+          isBestSeller: selectedProduct.isBestSeller
+        },
+        message: `Selected product "${selectedProduct.title}" for $${selectedProduct.price}`
+      };
+    } catch (error) {
+      logger.error(`Select product by budget error: ${error.message}`);
+      throw new Error(`Failed to select product by budget: ${error.message}`);
+    }
+  }
 }
 
 module.exports = BrowserController; 
