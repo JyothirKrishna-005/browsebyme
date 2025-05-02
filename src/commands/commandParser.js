@@ -244,7 +244,7 @@ class CommandParser {
         case 'navigate': 
         case 'goto': 
         case 'open':
-          return await this.handleNavigationCommand(tokens, sessionId);
+          return await this.handleNavigateCommand(tokens, sessionId);
         
         case 'click':
           return await this.handleClickCommand(tokens, sessionId);
