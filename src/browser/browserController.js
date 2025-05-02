@@ -200,6 +200,16 @@ class BrowserController {
       const resolvedSelector = await this.findBestSelector(selector, sessionId);
       
       if (!resolvedSelector) {
+        // If we can't find a direct match, try special handling for product listings
+        const isProductSelector = this.isProductListingSelector(selector);
+        
+        if (isProductSelector) {
+          const result = await this.handleProductListingClick(selector, sessionId);
+          if (result.success) {
+            return result;
+          }
+        }
+        
         throw new Error(`Element ${selector} not found or not visible`);
       }
       
@@ -220,8 +230,15 @@ class BrowserController {
       // Wait a brief moment for any animations to complete
       await session.page.waitForTimeout(500);
       
-      // Click the element
-      await session.page.click(resolvedSelector);
+      // Try standard click first
+      try {
+        await session.page.click(resolvedSelector);
+      } catch (clickError) {
+        // If standard click fails, try alternative approaches
+        logger.warn(`Standard click failed for ${resolvedSelector}, trying alternatives: ${clickError.message}`);
+        
+        await this.attemptAlternativeClicks(resolvedSelector, sessionId);
+      }
       
       // Wait a moment for any page changes to start
       await session.page.waitForTimeout(500);
@@ -233,6 +250,220 @@ class BrowserController {
       throw new Error(`Failed to click element ${selector}: ${error.message}`);
     }
   }
+  
+  /**
+   * Check if a selector appears to be targeting a product in a listing
+   * @param {string} selector - Element selector to check
+   * @returns {boolean} True if it's likely a product listing selector
+   */
+  isProductListingSelector(selector) {
+    // Common patterns for product listings
+    const productPatterns = [
+      /nth-of-type/i,
+      /nth-child/i,
+      /s-result-item/i,
+      /product-item/i,
+      /product-card/i,
+      /product\s+\d+/i,
+      /item\s+\d+/i,
+      /result\s+\d+/i,
+      /search-result/i
+    ];
+    
+    return productPatterns.some(pattern => pattern.test(selector));
+  }
+  
+  /**
+   * Attempt alternative click approaches when standard click fails
+   * @param {string} selector - Element selector
+   * @param {string} sessionId - Browser session ID
+   */
+  async attemptAlternativeClicks(selector, sessionId) {
+    const session = this.getSession(sessionId);
+    
+    // Try 3 different click strategies
+    const attempts = [
+      // 1. Try JavaScript click
+      async () => {
+        return await session.page.evaluate((sel) => {
+          const element = document.querySelector(sel);
+          if (element) {
+            element.click();
+            return true;
+          }
+          return false;
+        }, selector);
+      },
+      
+      // 2. Try click via mouse position
+      async () => {
+        const elementHandle = await session.page.$(selector);
+        if (elementHandle) {
+          const boundingBox = await elementHandle.boundingBox();
+          if (boundingBox) {
+            await session.page.mouse.click(
+              boundingBox.x + boundingBox.width / 2,
+              boundingBox.y + boundingBox.height / 2
+            );
+            return true;
+          }
+        }
+        return false;
+      },
+      
+      // 3. Try parent element click
+      async () => {
+        return await session.page.evaluate((sel) => {
+          const element = document.querySelector(sel);
+          if (element && element.parentElement) {
+            element.parentElement.click();
+            return true;
+          }
+          return false;
+        }, selector);
+      }
+    ];
+    
+    // Try each approach
+    for (const attempt of attempts) {
+      try {
+        const success = await attempt();
+        if (success) {
+          logger.info(`Alternative click succeeded for ${selector}`);
+          return true;
+        }
+      } catch (e) {
+        // Continue to next attempt
+        continue;
+      }
+    }
+    
+    throw new Error(`All click attempts failed for ${selector}`);
+  }
+  
+  /**
+   * Handle clicks in product listings which often have complex structures
+   * @param {string} selector - Original selector (often nth-child based)
+   * @param {string} sessionId - Browser session ID
+   * @returns {object} Click result
+   */
+  async handleProductListingClick(selector, sessionId) {
+    const session = this.getSession(sessionId);
+    
+    try {
+      // First, examine the selector to understand what it's trying to target
+      const parts = selector.split(/\s+/);
+      
+      // Get the index if this is an nth-child or nth-of-type selector
+      let targetIndex = 0;
+      const indexMatch = selector.match(/nth-(?:child|of-type)\((\d+)\)/i);
+      if (indexMatch) {
+        targetIndex = parseInt(indexMatch[1], 10) - 1; // Convert to 0-based index
+      }
+      
+      // Extract likely container pattern and target element type
+      let containerPattern = '';
+      let targetElement = 'a';
+      
+      if (selector.includes('result-item') || selector.includes('s-result')) {
+        containerPattern = '.s-result-item, [data-component-type="s-search-result"]';
+      } else if (selector.includes('product-item') || selector.includes('product-card')) {
+        containerPattern = '.product-item, .product-card, [data-testid="product-card"]';
+      } else {
+        // Generic list item pattern
+        containerPattern = '.item, .product, li[class*="item"], li[class*="product"], div[class*="product"]';
+      }
+      
+      // If the selector mentions "h2 a", we're likely looking for a product title link
+      if (selector.includes('h2') && selector.includes('a')) {
+        targetElement = 'h2 a, .product-title a, .title a, a[class*="title"], a.item-title';
+      } else if (selector.includes('img')) {
+        targetElement = 'img, .product-image img, .item-image img, a img';
+      }
+      
+      // Now use a robust approach - get all matching containers first
+      const productElements = await session.page.$$(containerPattern);
+      
+      if (productElements.length === 0) {
+        logger.warn(`No product containers found matching ${containerPattern}`);
+        return { success: false };
+      }
+      
+      // Use the target index, or default to the first item
+      const targetProductIndex = Math.min(targetIndex, productElements.length - 1);
+      const targetProduct = productElements[targetProductIndex];
+      
+      // Try multiple approaches to find clickable element within the target product
+      // 1. First try to find the specific target element within this product
+      const nestedTarget = await targetProduct.$(targetElement);
+      
+      if (nestedTarget) {
+        // Found target - scroll it into view
+        await session.page.evaluate((element) => {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, nestedTarget);
+        
+        await session.page.waitForTimeout(500);
+        
+        // Try to click it
+        await nestedTarget.click();
+        logger.info(`Successfully clicked nested target in product listing`);
+        return { success: true };
+      }
+      
+      // 2. If specific target not found, click the product element itself
+      await session.page.evaluate((element) => {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, targetProduct);
+      
+      await session.page.waitForTimeout(500);
+      
+      // Find the most clickable element within the product
+      const clicked = await session.page.evaluate((productElement) => {
+        // Priority list of elements to try clicking
+        const clickPriority = [
+          'a[href]:visible',  // Any visible link
+          'a.product-title, a.item-title, h2 a, .product-name a', // Title links
+          'img[class*="product"], img[class*="item"]', // Product images
+          'a:has(img)', // Links with images
+          'a', // Any link
+          '[onclick]', // Elements with click handlers
+          '[role="button"]', // Buttons
+          '[class*="button"]' // Button-like elements
+        ];
+        
+        let elementToClick = null;
+        
+        for (const selector of clickPriority) {
+          const elements = productElement.querySelectorAll(selector);
+          if (elements.length > 0) {
+            elementToClick = elements[0];
+            break;
+          }
+        }
+        
+        // If we found an element, click it
+        if (elementToClick) {
+          elementToClick.click();
+          return true;
+        }
+        
+        // Last resort - click the product element itself
+        productElement.click();
+        return true;
+      }, targetProduct);
+      
+      if (clicked) {
+        logger.info(`Successfully clicked product element using enhanced product listing handler`);
+        return { success: true };
+      }
+      
+      return { success: false };
+    } catch (error) {
+      logger.error(`Product listing click handler error: ${error.message}`);
+      return { success: false };
+    }
+  }
 
   /**
    * Find the best selector for an element
@@ -242,6 +473,31 @@ class BrowserController {
    */
   async findBestSelector(selector, sessionId) {
     const session = this.getSession(sessionId);
+    
+    // Handle nth-child selectors specially
+    if (selector.includes('nth-child') || selector.includes('nth-of-type')) {
+      try {
+        const elements = await session.page.$$(selector);
+        if (elements.length > 0) {
+          const isVisible = await elements[0].isVisible();
+          if (isVisible) return selector;
+        }
+      } catch (e) {
+        // Try alternative selector strategies for positional selectors
+        const alternativeSelector = this.convertNthSelector(selector);
+        if (alternativeSelector && alternativeSelector !== selector) {
+          try {
+            const elements = await session.page.$$(alternativeSelector);
+            if (elements.length > 0) {
+              const isVisible = await elements[0].isVisible();
+              if (isVisible) return alternativeSelector;
+            }
+          } catch (altError) {
+            // Continue with other approaches
+          }
+        }
+      }
+    }
     
     // Step 1: Check if selector is directly valid
     try {
@@ -295,7 +551,44 @@ class BrowserController {
       }
     }
     
-    // Step 5: Try to find by analyzing the page structure
+    // Step 5: Check if it's a product listing selector and handle specially
+    if (this.isProductListingSelector(selector)) {
+      // Try to find any visible product items
+      const productSelectors = [
+        '.s-result-item', 
+        '[data-component-type="s-search-result"]',
+        '.product-item', 
+        '.product-card', 
+        '[data-testid="product-card"]',
+        '.item',
+        'li[class*="product"]',
+        'div[class*="product"]'
+      ];
+      
+      for (const prodSel of productSelectors) {
+        try {
+          const elements = await session.page.$$(prodSel);
+          if (elements.length > 0) {
+            const isVisible = await elements[0].isVisible();
+            if (isVisible) {
+              // Extract index information from the original selector
+              const indexMatch = selector.match(/nth-(?:child|of-type)\((\d+)\)/i);
+              if (indexMatch) {
+                const index = parseInt(indexMatch[1], 10);
+                return `${prodSel}:nth-child(${index})`;
+              } else {
+                return `${prodSel}:first-child`;
+              }
+            }
+          }
+        } catch (e) {
+          // Try next product selector
+          continue;
+        }
+      }
+    }
+    
+    // Step 6: Try to find by analyzing the page structure
     try {
       const analysisResult = await this.analyzePageStructure(selector, sessionId);
       if (analysisResult) return analysisResult;
@@ -305,6 +598,190 @@ class BrowserController {
     
     // No suitable selector found
     return null;
+  }
+  
+  /**
+   * Convert nth-child or nth-of-type selectors to alternative formats
+   * @param {string} selector - Original selector with nth-child or nth-of-type
+   * @returns {string} Alternative selector format
+   */
+  convertNthSelector(selector) {
+    // Extract the index
+    const nthMatch = selector.match(/nth-(?:child|of-type)\((\d+)\)/i);
+    if (!nthMatch) return selector;
+    
+    const index = parseInt(nthMatch[1], 10);
+    
+    // Split the selector to get the container and the target
+    const parts = selector.split(/\s+/);
+    
+    // If it's a simple nth-child on a single element
+    if (parts.length === 1) {
+      // Try with :eq() as alternative
+      return selector.replace(/nth-(?:child|of-type)\((\d+)\)/i, `:nth-child(${index})`);
+    }
+    
+    // If we have a more complex selector like ".container .item:nth-child(2) a"
+    const nthPartIndex = parts.findIndex(part => part.includes('nth-'));
+    
+    if (nthPartIndex >= 0 && nthPartIndex < parts.length - 1) {
+      // We have elements after the nth-part, try to construct alternative
+      const containerParts = parts.slice(0, nthPartIndex + 1);
+      const targetParts = parts.slice(nthPartIndex + 1);
+      
+      // Replace the nth-part with a different approach
+      const containerSelector = containerParts.join(' ').replace(/nth-(?:child|of-type)\((\d+)\)/i, `:nth-child(${index})`);
+      
+      // Alternatives to try
+      return `${containerSelector} ${targetParts.join(' ')}`;
+    }
+    
+    return selector;
+  }
+
+  /**
+   * Generate alternative selectors for an element
+   * @param {string} originalSelector - Original selector
+   * @returns {Array} Array of alternative selectors
+   */
+  generateAlternativeSelectors(originalSelector) {
+    const alternatives = [];
+    const lowerSelector = originalSelector.toLowerCase();
+    
+    // Handle nth-child and nth-of-type selectors
+    if (lowerSelector.includes('nth-child') || lowerSelector.includes('nth-of-type')) {
+      const nthMatch = originalSelector.match(/nth-(?:child|of-type)\((\d+)\)/i);
+      if (nthMatch) {
+        const index = parseInt(nthMatch[1], 10);
+        
+        // Add variations of the nth-selector
+        const baseWithoutNth = originalSelector.replace(/\:nth-(?:child|of-type)\((\d+)\)/i, '');
+        alternatives.push(`${baseWithoutNth}:nth-child(${index})`);
+        alternatives.push(`${baseWithoutNth}:nth-of-type(${index})`);
+        
+        // For first item, add :first-child alternatives
+        if (index === 1) {
+          alternatives.push(`${baseWithoutNth}:first-child`);
+          alternatives.push(`${baseWithoutNth}:first-of-type`);
+        }
+        
+        // Product listing specific alternatives
+        if (originalSelector.includes('result-item') || originalSelector.includes('product')) {
+          const nthReplaced = originalSelector.replace(/\:nth-(?:child|of-type)\((\d+)\)/i, '');
+          alternatives.push(`${nthReplaced}:nth-child(${index})`);
+          alternatives.push(`.s-result-item:nth-child(${index})`);
+          alternatives.push(`[data-component-type="s-search-result"]:nth-child(${index})`);
+          alternatives.push(`.product-item:nth-child(${index})`);
+          alternatives.push(`.product-card:nth-child(${index})`);
+          alternatives.push(`[data-testid="product-card"]:nth-child(${index})`);
+        }
+      }
+    }
+    
+    // Add site-specific selectors for common elements
+    // Amazon.in specific selectors
+    if (lowerSelector.includes('search') || lowerSelector.includes('find')) {
+      alternatives.push('#twotabsearchtextbox'); // Amazon search box
+      alternatives.push('input[name="field-keywords"]');
+      alternatives.push('input[aria-label*="search" i]');
+    }
+    
+    // Amazon search submit button
+    if (lowerSelector.includes('search button') || lowerSelector.includes('submit search')) {
+      alternatives.push('input[value="Go"]');
+      alternatives.push('input.nav-input[type="submit"]');
+      alternatives.push('#nav-search-submit-button');
+    }
+    
+    // If it's a button selector, try common button patterns
+    if (lowerSelector.includes('button')) {
+      alternatives.push('button');
+      alternatives.push('[type="button"]');
+      alternatives.push('[role="button"]');
+      alternatives.push('.btn');
+      alternatives.push('.button');
+      alternatives.push('input[type="button"]');
+      alternatives.push('input[type="submit"]');
+      
+      // If the selector has text after "button", use it for text matching
+      const buttonTextMatch = lowerSelector.match(/button\s+(.+)/i);
+      if (buttonTextMatch) {
+        const text = buttonTextMatch[1].trim();
+        alternatives.push(`button:has-text("${text}")`);
+        alternatives.push(`[role="button"]:has-text("${text}")`);
+        alternatives.push(`button:text-is("${text}")`);
+      }
+    }
+    
+    // If it's a link selector, try common link patterns
+    if (lowerSelector.includes('link') || lowerSelector.includes('a ')) {
+      alternatives.push('a');
+      alternatives.push('[href]');
+      
+      // If the selector has text after "link", use it for text matching
+      const linkTextMatch = lowerSelector.match(/link\s+(.+)/i) || lowerSelector.match(/a\s+(.+)/i);
+      if (linkTextMatch) {
+        const text = linkTextMatch[1].trim();
+        alternatives.push(`a:has-text("${text}")`);
+        alternatives.push(`a:text-is("${text}")`);
+      }
+    }
+    
+    // If it's a form field, try common field patterns
+    if (lowerSelector.includes('input') || lowerSelector.includes('field') || lowerSelector.includes('text') || lowerSelector.includes('box')) {
+      alternatives.push('input');
+      alternatives.push('textarea');
+      alternatives.push('input[type="text"]');
+      
+      // More specific fields by common names
+      if (lowerSelector.includes('email')) {
+        alternatives.push('input[type="email"]');
+        alternatives.push('input[name*="email" i]');
+        alternatives.push('input[placeholder*="email" i]');
+      } else if (lowerSelector.includes('password')) {
+        alternatives.push('input[type="password"]');
+        alternatives.push('input[name*="password" i]');
+        alternatives.push('input[placeholder*="password" i]');
+      } else if (lowerSelector.includes('phone')) {
+        alternatives.push('input[type="tel"]');
+        alternatives.push('input[name*="phone" i]');
+        alternatives.push('input[placeholder*="phone" i]');
+      }
+    }
+    
+    // If it's a search field
+    if (lowerSelector.includes('search') || lowerSelector.includes('[name="q"]') || lowerSelector.includes('find')) {
+      alternatives.push('input[type="search"]');
+      alternatives.push('input[name="q"]');
+      alternatives.push('input[placeholder*="search" i]');
+      alternatives.push('[aria-label*="search" i]');
+      alternatives.push('[name="field-keywords"]'); // Amazon specific
+      alternatives.push('#twotabsearchtextbox'); // Amazon specific
+    }
+    
+    // Submit buttons
+    if (lowerSelector.includes('submit') || lowerSelector.includes('send') || lowerSelector.includes('go')) {
+      alternatives.push('[type="submit"]');
+      alternatives.push('button[type="submit"]');
+      alternatives.push('input[type="submit"]');
+      alternatives.push('button:has-text("Search")');
+      alternatives.push('button:has-text("Submit")');
+      alternatives.push('button:has-text("Go")');
+      alternatives.push('button:has-text("Send")');
+      alternatives.push('input[value="Go"]');
+      alternatives.push('#nav-search-submit-button'); // Amazon specific
+    }
+    
+    // Product links
+    if (lowerSelector.includes('product') || lowerSelector.includes('item') || lowerSelector.includes('result')) {
+      alternatives.push('.s-result-item h2 a');
+      alternatives.push('[data-component-type="s-search-result"] h2 a');
+      alternatives.push('.product-item a.product-title');
+      alternatives.push('.product-card a.title');
+      alternatives.push('[data-testid="product-card"] a[data-testid="title"]');
+    }
+    
+    return alternatives;
   }
 
   /**
@@ -482,115 +959,6 @@ class BrowserController {
     } catch (e) {
       return false;
     }
-  }
-
-  /**
-   * Generate alternative selectors for an element
-   * @param {string} originalSelector - Original selector
-   * @returns {Array} Array of alternative selectors
-   */
-  generateAlternativeSelectors(originalSelector) {
-    const alternatives = [];
-    const lowerSelector = originalSelector.toLowerCase();
-    
-    // Add site-specific selectors for common elements
-    // Amazon.in specific selectors
-    if (lowerSelector.includes('search') || lowerSelector.includes('find')) {
-      alternatives.push('#twotabsearchtextbox'); // Amazon search box
-      alternatives.push('input[name="field-keywords"]');
-      alternatives.push('input[aria-label*="search" i]');
-    }
-    
-    // Amazon search submit button
-    if (lowerSelector.includes('search button') || lowerSelector.includes('submit search')) {
-      alternatives.push('input[value="Go"]');
-      alternatives.push('input.nav-input[type="submit"]');
-      alternatives.push('#nav-search-submit-button');
-    }
-    
-    // If it's a button selector, try common button patterns
-    if (lowerSelector.includes('button')) {
-      alternatives.push('button');
-      alternatives.push('button:visible');
-      alternatives.push('[type="button"]');
-      alternatives.push('[role="button"]');
-      alternatives.push('.btn');
-      alternatives.push('.button');
-      alternatives.push('input[type="button"]');
-      alternatives.push('input[type="submit"]');
-      
-      // If the selector has text after "button", use it for text matching
-      const buttonTextMatch = lowerSelector.match(/button\s+(.+)/i);
-      if (buttonTextMatch) {
-        const text = buttonTextMatch[1].trim();
-        alternatives.push(`button:has-text("${text}")`);
-        alternatives.push(`[role="button"]:has-text("${text}")`);
-        alternatives.push(`button:text-is("${text}")`);
-      }
-    }
-    
-    // If it's a link selector, try common link patterns
-    if (lowerSelector.includes('link') || lowerSelector.includes('a ')) {
-      alternatives.push('a');
-      alternatives.push('a:visible');
-      alternatives.push('[href]');
-      
-      // If the selector has text after "link", use it for text matching
-      const linkTextMatch = lowerSelector.match(/link\s+(.+)/i) || lowerSelector.match(/a\s+(.+)/i);
-      if (linkTextMatch) {
-        const text = linkTextMatch[1].trim();
-        alternatives.push(`a:has-text("${text}")`);
-        alternatives.push(`a:text-is("${text}")`);
-      }
-    }
-    
-    // If it's a form field, try common field patterns
-    if (lowerSelector.includes('input') || lowerSelector.includes('field') || lowerSelector.includes('text') || lowerSelector.includes('box')) {
-      alternatives.push('input');
-      alternatives.push('input:visible');
-      alternatives.push('textarea');
-      alternatives.push('input[type="text"]');
-      
-      // More specific fields by common names
-      if (lowerSelector.includes('email')) {
-        alternatives.push('input[type="email"]');
-        alternatives.push('input[name*="email" i]');
-        alternatives.push('input[placeholder*="email" i]');
-      } else if (lowerSelector.includes('password')) {
-        alternatives.push('input[type="password"]');
-        alternatives.push('input[name*="password" i]');
-        alternatives.push('input[placeholder*="password" i]');
-      } else if (lowerSelector.includes('phone')) {
-        alternatives.push('input[type="tel"]');
-        alternatives.push('input[name*="phone" i]');
-        alternatives.push('input[placeholder*="phone" i]');
-      }
-    }
-    
-    // If it's a search field
-    if (lowerSelector.includes('search') || lowerSelector.includes('[name="q"]') || lowerSelector.includes('find')) {
-      alternatives.push('input[type="search"]');
-      alternatives.push('input[name="q"]');
-      alternatives.push('input[placeholder*="search" i]');
-      alternatives.push('[aria-label*="search" i]');
-      alternatives.push('[name="field-keywords"]'); // Amazon specific
-      alternatives.push('#twotabsearchtextbox'); // Amazon specific
-    }
-    
-    // Submit buttons
-    if (lowerSelector.includes('submit') || lowerSelector.includes('send') || lowerSelector.includes('go')) {
-      alternatives.push('[type="submit"]');
-      alternatives.push('button[type="submit"]');
-      alternatives.push('input[type="submit"]');
-      alternatives.push('button:has-text("Search")');
-      alternatives.push('button:has-text("Submit")');
-      alternatives.push('button:has-text("Go")');
-      alternatives.push('button:has-text("Send")');
-      alternatives.push('input[value="Go"]');
-      alternatives.push('#nav-search-submit-button'); // Amazon specific
-    }
-    
-    return alternatives;
   }
 
   /**
