@@ -552,26 +552,78 @@ class CommandParser {
     await this.browserController.navigateTo('https://www.google.com', this.activeSession);
     
     // Give the page a moment to load fully
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // Try to find and fill the search box
+    // Try to find and fill the search box using standard selectors
     try {
+      // Get a reference to the session and page
+      const session = this.browserController.getSession(this.activeSession);
+      
+      // Use a clear simple selector for the search input
       await this.browserController.fillField('input[name="q"]', query, this.activeSession);
       
       // Try to click the search button
       try {
-        await this.browserController.clickElement('input[name="btnK"], button[name="btnK"], input[type="submit"], button[type="submit"]', this.activeSession);
+        // Try multiple selectors for search button, one at a time
+        await this.browserController.executeScript(`
+          const searchInput = document.querySelector('input[name="q"]');
+          if (searchInput) {
+            searchInput.value = "${query.replace(/"/g, '\\"')}";
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            
+            // Try to find the search button with various selectors
+            const searchButtons = [
+              document.querySelector('input[name="btnK"]'),
+              document.querySelector('button[name="btnK"]'),
+              document.querySelector('input[type="submit"]'),
+              document.querySelector('button[type="submit"]'),
+              ...document.querySelectorAll('input[type="submit"]'),
+              ...document.querySelectorAll('button[type="submit"]')
+            ].filter(Boolean);
+            
+            if (searchButtons.length > 0) {
+              // Click the first available button
+              searchButtons[0].click();
+            } else {
+              // If no button found, submit the form
+              const form = searchInput.closest('form');
+              if (form) form.submit();
+              
+              // As a last resort, press Enter on the input
+              searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+                bubbles: true
+              }));
+            }
+          }
+        `, this.activeSession);
       } catch (clickError) {
-        // If clicking failed, try pressing Enter
+        // If clicking failed, log the error and continue
+        console.log("Error during search button click:", clickError);
+        
+        // As a backup, try pressing Enter via the fill field method
         await this.browserController.executeScript(`
           const input = document.querySelector('input[name="q"]');
           if (input) {
             input.focus();
-            const event = new KeyboardEvent('keydown', { 'key': 'Enter', 'code': 'Enter', 'keyCode': 13, 'which': 13, 'bubbles': true });
+            const event = new KeyboardEvent('keydown', { 
+              'key': 'Enter', 
+              'code': 'Enter', 
+              'keyCode': 13, 
+              'which': 13, 
+              'bubbles': true 
+            });
             input.dispatchEvent(event);
           }
         `, this.activeSession);
       }
+      
+      // Wait for search results to load
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
     } catch (error) {
       logger.error(`Search error: ${error.message}`);
       throw new Error(`Failed to perform search: ${error.message}`);

@@ -264,27 +264,34 @@ class BrowserController {
     // Step 3: Try various alternative selectors
     const alternatives = this.generateAlternativeSelectors(selector);
     for (const alt of alternatives) {
-      const isVisible = await this.isElementVisible(alt, sessionId);
-      if (isVisible) return alt;
+      try {
+        const isVisible = await this.isElementVisible(alt, sessionId);
+        if (isVisible) return alt;
+      } catch (e) {
+        // Continue to next alternative
+        continue;
+      }
     }
     
     // Step 4: Use text-based search for interactive elements
     if (!selector.includes('.') && !selector.includes('#') && !selector.includes('[')) {
-      const textSelector = `text="${selector}"`;
-      try {
-        const isVisible = await session.page.isVisible(textSelector, { timeout: 1000 });
-        if (isVisible) return textSelector;
-      } catch (e) {
-        // Ignore error, continue to next strategy
-      }
-
-      // Try contains text
-      const containsSelector = `:text-is("${selector}")`;
-      try {
-        const isVisible = await session.page.isVisible(containsSelector, { timeout: 1000 });
-        if (isVisible) return containsSelector;
-      } catch (e) {
-        // Ignore error, continue to next strategy
+      // Use standard Playwright text selectors
+      const textSelectors = [
+        `text=${selector}`,           // Exact text match
+        `text="${selector}"`,         // Quoted text match
+        `[placeholder="${selector}"]` // Placeholder attribute
+      ];
+      
+      for (const textSelector of textSelectors) {
+        try {
+          const elements = await session.page.$$(textSelector);
+          if (elements.length > 0) {
+            const isVisible = await elements[0].isVisible();
+            if (isVisible) return textSelector;
+          }
+        } catch (e) {
+          // Ignore error, try next selector
+        }
       }
     }
     
@@ -459,13 +466,20 @@ class BrowserController {
    * Check if an element is visible
    * @param {string} selector - Element selector
    * @param {string} sessionId - Browser session ID
-   * @returns {boolean} Whether the element is visible
+   * @returns {boolean} True if element is visible
    */
   async isElementVisible(selector, sessionId) {
     try {
       const session = this.getSession(sessionId);
-      return await session.page.isVisible(selector, { timeout: 1000 });
-    } catch (error) {
+      
+      // Use Playwright's built-in isVisible method
+      const element = await session.page.$(selector);
+      
+      if (!element) return false;
+      
+      const isVisible = await element.isVisible();
+      return isVisible;
+    } catch (e) {
       return false;
     }
   }
